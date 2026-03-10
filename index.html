@@ -1,0 +1,1688 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Vôlei no Sidney</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Export PNG -->
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+  <!-- Firebase (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#111827">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Vôlei no Sidney">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <!-- /PWA -->
+
+</head>
+
+<body class="min-h-screen bg-gradient-to-br from-blue-50 to-orange-50">
+  <div id="app" class="p-4 sm:p-6 max-w-6xl mx-auto">
+    <div class="text-center py-12">
+      <p class="text-gray-600">Carregando...</p>
+    </div>
+  </div>
+
+  <!-- Modal Avaliação (oculta) -->
+  <div id="ratingBack" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl w-full max-w-lg p-4 sm:p-6">
+      <div class="flex items-center justify-between gap-3">
+        <h3 class="text-xl font-extrabold text-gray-800">Avaliar (oculto)</h3>
+        <button id="btnRateClose" class="px-3 py-2 rounded-lg border hover:bg-gray-50">Fechar</button>
+      </div>
+
+      <div id="rateMe" class="mt-2 text-sm text-gray-700"></div>
+
+      <div class="mt-4 grid gap-2">
+        <label class="text-xs text-gray-500">Quem você avalia</label>
+        <select id="rateTarget" class="px-3 py-2 rounded-lg border">
+          <option value="">Selecione</option>
+        </select>
+      </div>
+
+      <div class="mt-4 border rounded-xl p-3">
+        <div class="text-sm font-semibold mb-2">Nota (5–10)</div>
+        <div id="scoreRow" class="flex flex-wrap gap-2"></div>
+      </div>
+
+      <button id="btnSendRating" class="mt-4 w-full px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
+        Enviar avaliação
+      </button>
+
+      <div class="mt-3 text-xs text-gray-500">
+        As avaliações são ocultas (não exibimos quem avaliou quem). Você pode avaliar mesmo após iniciar uma nova rodada.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ===============================
+    // Firebase config (seu projeto)
+    // ===============================
+    const firebaseConfig = {
+  "apiKey": "AIzaSyDykk6em3koHEi7uqBxCB9yycXJC3WOZ2U",
+  "authDomain": "times-manchette.firebaseapp.com",
+  "projectId": "times-manchette",
+  "storageBucket": "times-manchette.firebasestorage.app",
+  "messagingSenderId": "774710663618",
+  "appId": "1:774710663618:web:7585bf93588603c7371e5b",
+  "measurementId": "G-H9WLSPM3QY"
+};
+
+    // ===============================
+    // Config do app
+    // ===============================
+    const LS_SESSION = "vb_session_v3";
+    const LS_LAST_CODE = "vb_last_code_v3";
+
+    const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
+
+    // Admin (não exibimos a senha em lugar nenhum)
+    const ADMIN_PASS = "admin123"; // troque se quiser
+
+    // Escalas
+    const MIN_NOTA = 5, MAX_NOTA = 10;
+    const RATE_BASELINE = 7.5;
+
+    // ✅ Só avisar desequilíbrio depois de X escolhas
+    const MIN_ESCOLHAS_PARA_ALERTA = 5;
+
+    // Limite de jogadores por time (6x6)
+    const TEAM_MAX = 6;
+
+    // ===============================
+    // Estado
+    // ===============================
+    let session = load(LS_SESSION, { code:"", playerId:"", prevPlayerId:"", admin:false });
+
+    let state = {
+      code: "",
+      open: true,
+      activeRoundId: "",
+      activeRoundAtMs: 0,
+
+      players: {},       // id -> player (cadastro fixo)
+      attendance: {},    // playerId -> {present, team, checkedInAtMs}
+      ratings: {},       // id -> rating
+      snapshots: {},     // id -> snapshot
+
+      syncError: "",
+      info: ""
+    };
+
+    let db = null;
+    let unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
+
+    // ===============================
+    // Helpers
+    // ===============================
+    function $(id){ return document.getElementById(id); }
+    function nowIso(){ return new Date().toISOString(); }
+    function nowMs(){ return Date.now(); }
+    function clamp(n,a,b){ return Math.max(a, Math.min(b, n)); }
+    function avg(arr){ return arr.length ? arr.reduce((x,y)=>x+y,0)/arr.length : 0; }
+    function median(arr){
+      if(!arr.length) return 0;
+      const s=[...arr].sort((a,b)=>a-b);
+      const m=Math.floor(s.length/2);
+      return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
+    }
+    function genCode(len=6){
+      const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let out="";
+      for(let i=0;i<len;i++) out += alphabet[Math.floor(Math.random()*alphabet.length)];
+      return out;
+    }
+
+// Código do Jogador (para entrar em outro celular/PC)
+function genPlayerCode(len=10){
+  const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out="";
+  for(let i=0;i<len;i++) out += alphabet[Math.floor(Math.random()*alphabet.length)];
+  return out;
+}
+
+async function ensureAccessCodeForPlayer(code, playerId){
+  const c = String(code||"").toUpperCase();
+  const ref = playersCol(c).doc(playerId);
+  const snap = await ref.get();
+  if(!snap.exists) throw new Error("Jogador não encontrado.");
+  const d = snap.data() || {};
+  if(d.accessCode) return d.accessCode;
+
+  // tenta alguns códigos (baixa chance de colisão)
+  for(let k=0;k<5;k++){
+    const ac = genPlayerCode(10);
+    const q = await playersCol(c).where("accessCode","==",ac).limit(1).get();
+    if(q.empty){
+      await ref.set({ accessCode: ac, updatedAt: nowIso() }, { merge:true });
+      return ac;
+    }
+  }
+  throw new Error("Não consegui gerar um código agora. Tente novamente.");
+}
+
+async function claimPlayerByAccessCode(){
+  try{
+    const code = state.code;
+    if(!code) return alert("Entre na sala primeiro (código da partida).");
+    const acRaw = ($("accessCodeInput")?.value || "").trim().toUpperCase().replace(/\s+/g,"");
+    if(!acRaw) return alert("Digite seu Código do Jogador.");
+    const qs = await playersCol(code).where("accessCode","==",acRaw).limit(1).get();
+    if(qs.empty) return alert("Código não encontrado nesta sala. Verifique e tente novamente.");
+    const doc = qs.docs[0];
+    const d = doc.data() || {};
+    session.playerId = doc.id;
+    persistSession();
+    if($("accessCodeInput")) $("accessCodeInput").value = "";
+    setInfo(`Cadastro recuperado: ${d.name || "Jogador"}.`);
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }
+}
+
+async function copyText(text){
+  try{
+    await navigator.clipboard.writeText(text);
+    setInfo("Copiado.");
+  }catch{
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try{ document.execCommand("copy"); setInfo("Copiado."); }
+    catch{ alert("Não consegui copiar automaticamente."); }
+    document.body.removeChild(ta);
+  }
+}
+
+    function safeId(){
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+      return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(2,8);
+    }
+    function escapeHtml(s){
+      return String(s).replace(/[&<>'"]/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"
+      }[c]));
+    }
+    function save(key, value){ try{ localStorage.setItem(key, JSON.stringify(value)); }catch{} }
+    function load(key, fallback){
+      try{
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      }catch{ return fallback; }
+    }
+    function persistSession(){
+      save(LS_SESSION, session);
+      if(state.code) save(LS_LAST_CODE, state.code);
+    }
+    function setInfo(msg){ state.info = msg ? String(msg) : ""; render(); }
+    function setSyncError(msg){ state.syncError = msg ? String(msg) : ""; render(); }
+    function fmtBR(msOrIso){
+      try{
+        const d = typeof msOrIso === "number" ? new Date(msOrIso) : new Date(msOrIso || Date.now());
+        return d.toLocaleString("pt-BR");
+      }catch{ return ""; }
+    }
+
+    function me(){
+      if(!session.playerId) return null;
+      return state.players && state.players[session.playerId] ? state.players[session.playerId] : null;
+    }
+
+    function isPresent(playerId){
+      const a = state.attendance && state.attendance[playerId];
+      return !!(a && a.present === true);
+    }
+
+    function teamOf(playerId){
+      const a = state.attendance && state.attendance[playerId];
+      return a && (a.team === 1 || a.team === 2) ? a.team : null;
+    }
+
+    // ===============================
+    // Nota calculada (interno)
+    // ===============================
+    function byTargetScores(ratings){
+      const map = {};
+      for(const k in (ratings||{})){
+        const r = ratings[k];
+        const tid = r.targetId;
+        if(!map[tid]) map[tid]=[];
+        map[tid].push(Number(r.score)||RATE_BASELINE);
+      }
+      return map;
+    }
+
+    function computedNote(p, byTarget){
+      const base = clamp(Number(p.baseNote)||RATE_BASELINE, MIN_NOTA, MAX_NOTA);
+      const rec = byTarget[p.id] || [];
+      const med = rec.length ? median(rec) : RATE_BASELINE;
+
+      // Ajuste leve: notas dos outros corrigem a autoavaliação aos poucos
+      const adj = (med - RATE_BASELINE) * 0.25;
+      return clamp(base + adj, MIN_NOTA, MAX_NOTA);
+    }
+
+    function teamAvg(players, byTarget){
+      return avg(players.map(p => computedNote(p, byTarget)));
+    }
+
+    function balanceMessage(t1, t2, byTarget){
+      const picked = (t1.length + t2.length);
+      if(t1.length===0 && t2.length===0) return { ok:true, text:"" };
+      if(picked < MIN_ESCOLHAS_PARA_ALERTA) return { ok:true, text:"" };
+
+      const a1 = teamAvg(t1, byTarget);
+      const a2 = teamAvg(t2, byTarget);
+      const diff = Math.abs(a1-a2);
+
+      if(diff>=1.60) return { ok:false, text:`⚠️ Desequilíbrio alto (diferença ~${diff.toFixed(2)})` };
+      if(diff>=1.00) return { ok:true,  text:`Atenção: pode desequilibrar (~${diff.toFixed(2)})` };
+      return { ok:true, text:`✓ Times equilibrados (~${diff.toFixed(2)})` };
+    }
+
+    // ===============================
+    // Firestore paths
+    // ===============================
+    function matchDoc(code){ return db.collection("matches").doc(String(code||"").toUpperCase()); }
+    function playersCol(code){ return matchDoc(code).collection("players"); }
+    function ratingsCol(code){ return matchDoc(code).collection("ratings"); }
+    function snapshotsCol(code){ return matchDoc(code).collection("snapshots"); }
+    function roundsCol(code){ return matchDoc(code).collection("rounds"); }
+    function roundDoc(code, roundId){ return roundsCol(code).doc(String(roundId)); }
+    function attendanceCol(code, roundId){ return roundDoc(code, roundId).collection("attendance"); }
+
+    async function ensureRoom(code){
+      const c = String(code||"").toUpperCase();
+      await matchDoc(c).set({ code:c, open:true, updatedAt: nowIso() }, { merge:true });
+      await ensureActiveRound(c);
+    }
+
+    function newRoundId(){
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,"0");
+      const da = String(d.getDate()).padStart(2,"0");
+      const hh = String(d.getHours()).padStart(2,"0");
+      const mm = String(d.getMinutes()).padStart(2,"0");
+      return `r${y}${m}${da}-${hh}${mm}-${Math.random().toString(36).slice(2,6)}`;
+    }
+
+    async function ensureActiveRound(code){
+      const c = String(code||"").toUpperCase();
+      const snap = await matchDoc(c).get();
+      const d = snap.exists ? snap.data() : null;
+      if(d && d.activeRoundId) return;
+
+      const rid = newRoundId();
+      const at = nowMs();
+      await roundDoc(c, rid).set({ id: rid, createdAt: nowIso(), createdAtMs: at }, { merge:true });
+      await matchDoc(c).set({ activeRoundId: rid, activeRoundAtMs: at }, { merge:true });
+    }
+
+    function detachRoom(){
+      try{ unsub.meta && unsub.meta(); }catch{}
+      try{ unsub.players && unsub.players(); }catch{}
+      try{ unsub.attendance && unsub.attendance(); }catch{}
+      try{ unsub.ratings && unsub.ratings(); }catch{}
+      try{ unsub.snapshots && unsub.snapshots(); }catch{}
+      unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
+    }
+
+    function attachAttendanceListener(code, roundId){
+      const c = String(code||"").toUpperCase();
+      const rid = String(roundId||"");
+      if(!rid) return;
+
+      try{ unsub.attendance && unsub.attendance(); }catch{}
+      unsub.attendance = attendanceCol(c, rid).onSnapshot((qs)=>{
+        const obj = {};
+        qs.forEach(doc=> obj[doc.id] = doc.data());
+        state.attendance = obj;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+    }
+
+    function attachRoom(code){
+      const c = String(code||"").toUpperCase();
+      detachRoom();
+      setSyncError("");
+
+      unsub.meta = matchDoc(c).onSnapshot((snap)=>{
+        const d = snap.exists ? snap.data() : null;
+        if(d && typeof d.open === "boolean") state.open = d.open;
+
+        const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
+        const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
+
+        if(nextRid && nextRid !== state.activeRoundId){
+          state.activeRoundId = nextRid;
+          state.activeRoundAtMs = nextAt || 0;
+          attachAttendanceListener(c, nextRid);
+        } else {
+          state.activeRoundAtMs = nextAt || state.activeRoundAtMs;
+        }
+
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+
+      unsub.players = playersCol(c).onSnapshot((qs)=>{
+        const obj = {};
+        qs.forEach(doc=> obj[doc.id] = doc.data());
+        state.players = obj;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+
+      unsub.ratings = ratingsCol(c).onSnapshot((qs)=>{
+        const obj = {};
+        qs.forEach(doc=> obj[doc.id] = doc.data());
+        state.ratings = obj;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+
+      unsub.snapshots = snapshotsCol(c).orderBy("createdAtMs","desc").limit(10).onSnapshot((qs)=>{
+        const obj = {};
+        qs.forEach(doc=> obj[doc.id] = doc.data());
+        state.snapshots = obj;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+    }
+
+    async function setPlayer(code, player){
+      const c = String(code||"").toUpperCase();
+      await playersCol(c).doc(player.id).set(player, { merge:true });
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function setAttendance(code, roundId, playerId, patch){
+      const c = String(code||"").toUpperCase();
+      const rid = String(roundId||"");
+      if(!rid) throw new Error("Rodada ativa não encontrada.");
+      await attendanceCol(c, rid).doc(playerId).set(patch, { merge:true });
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function setRating(code, rating){
+      const c = String(code||"").toUpperCase();
+      await ratingsCol(c).doc(rating.id).set(rating, { merge:true });
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function metaUpdate(code, patch){
+      const c = String(code||"").toUpperCase();
+      await matchDoc(c).set(Object.assign({}, patch, { updatedAt: nowIso() }), { merge:true });
+    }
+
+    async function deleteCollection(colRef){
+      const snap = await colRef.limit(500).get();
+      if(snap.empty) return;
+      const batch = db.batch();
+      snap.docs.forEach(d=> batch.delete(d.ref));
+      await batch.commit();
+      if(snap.size === 500) return deleteCollection(colRef);
+    }
+
+    async function resetRoom(code){
+      const c = String(code||"").toUpperCase();
+
+      // apaga rounds + attendance (best effort)
+      const roundsSnap = await roundsCol(c).limit(50).get();
+      for(const rd of roundsSnap.docs){
+        const rid = rd.id;
+        await deleteCollection(attendanceCol(c, rid)).catch(()=>{});
+        await roundsCol(c).doc(rid).delete().catch(()=>{});
+      }
+
+      await deleteCollection(playersCol(c));
+      await deleteCollection(ratingsCol(c));
+      await deleteCollection(snapshotsCol(c));
+
+      const rid = newRoundId();
+      const at = nowMs();
+      await roundDoc(c, rid).set({ id: rid, createdAt: nowIso(), createdAtMs: at }, { merge:true });
+      await matchDoc(c).set({ code:c, open:true, activeRoundId: rid, activeRoundAtMs: at, updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function removePlayerAndRelatedRatings(code, playerId){
+      const c = String(code||"").toUpperCase();
+
+      await playersCol(c).doc(playerId).delete().catch(()=>{});
+      if(state.activeRoundId) await attendanceCol(c, state.activeRoundId).doc(playerId).delete().catch(()=>{});
+
+      async function deleteRatingsWhere(field, value){
+        let qs = await ratingsCol(c).where(field, "==", value).limit(200).get();
+        while(!qs.empty){
+          const batch = db.batch();
+          qs.docs.forEach(d=> batch.delete(d.ref));
+          await batch.commit();
+          if(qs.size < 200) break;
+          qs = await ratingsCol(c).where(field, "==", value).limit(200).get();
+        }
+      }
+
+      await deleteRatingsWhere("raterId", playerId);
+      await deleteRatingsWhere("targetId", playerId);
+
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    // ===============================
+    // Sala
+    // ===============================
+    async function createRoom(){
+      try{
+        const code = genCode(6);
+        await ensureRoom(code);
+        state.code = code;
+        session.code = code;
+        session.playerId = "";
+        session.admin = false;
+        persistSession();
+attachRoom(code);
+        setInfo("Sala criada. Compartilhe o código para os outros entrarem.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    async function joinRoom(){
+      try{
+        const code = ($("roomCode")?.value || "").trim().toUpperCase();
+        if(!code) return;
+        const prevCode = String(session.code||"").toUpperCase();
+        state.code = code;
+        session.code = code;
+
+        // Mantém o login (playerId/admin) se você estiver reentrando na MESMA sala
+        if(code !== prevCode){
+          session.playerId = "";
+          session.admin = false;
+        }
+        persistSession();
+await ensureRoom(code);
+        attachRoom(code);
+        setInfo("Entrou na sala. Agora cadastre seu nome.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    function leaveRoom(){
+      detachRoom();
+      session.code = "";
+      session.playerId = "";
+      session.admin = false;
+      persistSession();
+      state.code = "";
+      state.players = {};
+      state.attendance = {};
+      state.ratings = {};
+      state.snapshots = {};
+      state.activeRoundId = "";
+      state.activeRoundAtMs = 0;
+      state.open = true;
+      state.syncError = "";
+      state.info = "";
+      render();
+    }
+
+    // ===============================
+    // Jogador
+    // ===============================
+    async function registerMe(){
+      try{
+        const code = state.code;
+        if(!code) return;
+        if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+        const name = ($("playerName")?.value || "").trim();
+        const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
+        const position = ($("playerPos")?.value || "Coringa");
+
+        if(!name) return alert("Digite seu nome.");
+        if(!state.open) return alert("Inscrição fechada.");
+
+        const id = safeId();
+        const accessCode = genPlayerCode(10);
+
+        const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
+
+        session.playerId = id;
+        persistSession();
+
+        await setPlayer(code, player);
+
+        // ✅ ao cadastrar, já confirma presença na rodada atual (jogar hoje)
+        await setAttendance(code, state.activeRoundId, id, {
+          present: true,
+          team: null,
+          checkedInAtMs: nowMs(),
+          updatedAt: nowIso()
+        });
+
+        if($("playerName")) $("playerName").value = "";
+        setInfo("Você entrou na lista e confirmou presença (jogar hoje). Seu Código do Jogador: " + accessCode + " (guarde para entrar em outro celular/PC).");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    async function updateMyProfile(){
+      const code = state.code;
+      const m = me();
+      if(!code || !m) return;
+
+      try{
+        const name = String($("myNameInput")?.value || m.name || "").trim();
+        if(!name || name.length < 2) return alert("Informe um nome válido (mín. 2 letras).");
+        const baseNote = clamp(Number($("myNoteSelect")?.value || m.baseNote || 5), MIN_NOTA, MAX_NOTA);
+        const position = ($("myPosSelect")?.value || m.position || "Coringa");
+
+        await setPlayer(code, { id: m.id, name, baseNote, position, updatedAt: nowIso() });
+        setInfo("Cadastro atualizado (nome/nota/posição).");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+}
+
+
+    
+function startAddPlayer(){
+  const code = state.code;
+  if(!code) return alert("Entre em uma sala primeiro (código da partida).");
+  if(session.playerId) session.prevPlayerId = session.playerId;
+  session.playerId = "";
+  persistSession();
+  // limpa o formulário de cadastro
+  if($("playerName")) $("playerName").value = "";
+  if($("playerNote")) $("playerNote").value = "5";
+  if($("playerPos")) $("playerPos").value = "Coringa";
+  setInfo("Modo adicionar jogador: cadastre a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
+  render();
+  try{ window.scrollTo({top: 0, behavior: "smooth"}); }catch{ window.scrollTo(0,0); }
+}
+
+function backToPrevPlayer(){
+  if(!session.prevPlayerId) return;
+  session.playerId = session.prevPlayerId;
+  session.prevPlayerId = "";
+  persistSession();
+  setInfo("Você voltou para seu jogador.");
+  render();
+}
+
+async function markPresence(present){
+      const code = state.code;
+      const m = me();
+      if(!code || !m) return;
+      if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+      if(!state.open) return alert("Inscrição fechada.");
+
+      try{
+        await setAttendance(code, state.activeRoundId, m.id, {
+          present: !!present,
+          team: null,
+          checkedInAtMs: present ? nowMs() : null,
+          updatedAt: nowIso()
+        });
+        setInfo(present ? "Presença confirmada. Agora escolha seu time." : "Ausência marcada para esta rodada.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    async function sairDaLista(){
+      const code = state.code;
+      const m = me();
+      if(!code || !m) return;
+      const ok = confirm("Sair da lista desta sala? (remove também as notas relacionadas)");
+      if(!ok) return;
+
+      try{
+        await removePlayerAndRelatedRatings(code, m.id);
+        session.playerId = "";
+        persistSession();
+        setInfo("Você saiu da lista.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    async function chooseTeam(team){
+      try{
+        const m = me();
+        if(!m) return alert("Cadastre-se para escolher time.");
+        if(!state.open) return alert("Inscrição fechada.");
+        if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+        if(!isPresent(m.id)) return alert("Confirme presença antes de escolher time.");
+
+        const byTarget = byTargetScores(state.ratings);
+        const playersArr = Object.values(state.players||{});
+        // Limite 6x6: máximo 6 por time; acima de 12 distribuídos, extras ficam em espera
+        const currentTeam = teamOf(m.id); // 1, 2 ou null
+        let count1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1).length;
+        let count2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2).length;
+
+        // Para permitir troca de time, desconsidera você do seu time atual
+        if (currentTeam === 1) count1 = Math.max(0, count1 - 1);
+        if (currentTeam === 2) count2 = Math.max(0, count2 - 1);
+
+        const totalAssignedExcludingMe = count1 + count2;
+
+        // Se você ainda não tem time e já existem 12 jogadores distribuídos, você fica em espera
+        if (currentTeam == null && totalAssignedExcludingMe >= TEAM_MAX*2) {
+          return alert("Os times já estão completos (6x6). Você ficará em espera.");
+        }
+
+        // Checa lotação do time alvo (considerando que você vai entrar nele)
+        if (team === 1 && count1 >= TEAM_MAX) {
+          return alert("Time 1 já está completo (6 jogadores).");
+        }
+        if (team === 2 && count2 >= TEAM_MAX) {
+          return alert("Time 2 já está completo (6 jogadores).");
+        }
+
+
+        // monta times considerando APENAS presentes
+        const t1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1 && p.id!==m.id);
+        const t2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2 && p.id!==m.id);
+
+        const t1x = (team===1) ? t1.concat([m]) : t1;
+        const t2x = (team===2) ? t2.concat([m]) : t2;
+
+        const msg = balanceMessage(t1x, t2x, byTarget);
+
+        if(msg.text && !msg.ok){
+          const ok = confirm(msg.text + "\n\nQuer mesmo escolher este time?");
+          if(!ok) return;
+        }
+
+        await setAttendance(state.code, state.activeRoundId, m.id, { team });
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    // ===============================
+    // Admin
+    // ===============================
+    function adminLogin(){
+      const pass = ($("adminPass")?.value || "").trim();
+      if(pass !== ADMIN_PASS) return alert("Senha incorreta.");
+      session.admin = true;
+      persistSession();
+      if($("adminPass")) $("adminPass").value = "";
+      render();
+    }
+    function adminLogout(){ session.admin = false; persistSession(); render(); }
+
+    async function toggleOpen(){
+      if(!session.admin) return alert("Somente admin.");
+      await metaUpdate(state.code, { open: !state.open });
+    }
+
+    async function newRound(){
+      if(!session.admin) return alert("Somente admin.");
+      const ok = confirm("Nova rodada: todos começam AUSENTES e sem time. Cada jogador confirma presença novamente. Continuar?");
+      if(!ok) return;
+
+      try{
+        const code = state.code;
+        const rid = newRoundId();
+        const at = nowMs();
+        await roundDoc(code, rid).set({ id: rid, createdAt: nowIso(), createdAtMs: at }, { merge:true });
+        await matchDoc(code).set({ activeRoundId: rid, activeRoundAtMs: at, updatedAt: nowIso() }, { merge:true });
+        setInfo("Nova rodada iniciada. Agora cada jogador confirma presença.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    
+async function randomizeTeams(){
+      if(!session.admin) return alert("Somente admin.");
+      if(!state.activeRoundId) return alert("Rodada não carregou.");
+      const byTarget = byTargetScores(state.ratings);
+
+      // Apenas presentes
+      const playersArr = Object.values(state.players||{}).filter(p=> isPresent(p.id));
+      if(playersArr.length < 2) return alert("Poucos presentes para sortear.");
+
+      // Ordena por ordem de confirmação de presença (mais antigos primeiro)
+      const withCheckin = playersArr.map(p => ({
+        p,
+        t: (state.attendance[p.id] && state.attendance[p.id].checkedInAtMs) || 0
+      })).sort((a,b)=> a.t - b.t);
+
+      // Seleciona no máximo 12 (6x6). Os demais ficam em espera (team null)
+      const selected = withCheckin.slice(0, TEAM_MAX*2).map(x=>x.p);
+
+      const sorted = [...selected].sort((a,b)=> computedNote(b,byTarget) - computedNote(a,byTarget));
+      let sum1=0, sum2=0;
+      const assign = {};
+      sorted.forEach(p=>{
+        const sk = computedNote(p,byTarget);
+        if(sum1 <= sum2){ assign[p.id]=1; sum1+=sk; } else { assign[p.id]=2; sum2+=sk; }
+      });
+
+      const batch = db.batch();
+      const code = state.code;
+      const rid = state.activeRoundId;
+
+      // Aplica times aos 12 selecionados
+      Object.keys(assign).forEach(pid=>{
+        batch.set(attendanceCol(code, rid).doc(pid), { team: assign[pid], present:true, updatedAt: nowIso() }, { merge:true });
+      });
+
+      // Garante que os demais presentes fiquem em espera (team null)
+      playersArr.forEach(p=>{
+        if(!assign[p.id]){
+          batch.set(attendanceCol(code, rid).doc(p.id), { team: null, present:true, updatedAt: nowIso() }, { merge:true });
+        }
+      });
+
+      batch.set(matchDoc(code), { updatedAt: nowIso() }, { merge:true });
+      await batch.commit();
+      setInfo("Times sorteados (6x6). Jogadores extras ficaram em espera.");
+    }
+
+    async function adminRemovePlayer(playerId, playerName){
+      if(!session.admin) return alert("Somente admin.");
+      const ok = confirm(`Remover ${playerName} da sala? (remove também as notas relacionadas)`);
+      if(!ok) return;
+
+      try{
+        await removePlayerAndRelatedRatings(state.code, playerId);
+        setInfo(`${playerName} removido.`);
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    async function resetCurrentRoom(){
+      if(!session.admin) return alert("Somente admin.");
+      if(!confirm("Resetar jogadores, avaliações, rodadas e histórico desta sala? (zera tudo)")) return;
+      session.playerId = "";
+      persistSession();
+      await resetRoom(state.code);
+      setInfo("Sala resetada (tudo zerado).");
+    }
+
+    // ===============================
+    // Avaliação (oculta)
+    // ===============================
+    function openRatingModal(){
+      const m = me();
+      if(!m) return alert("Cadastre-se para avaliar.");
+      // Não exigimos presença para avaliar (permite avaliar mesmo após "Nova rodada").
+
+      $("ratingBack").classList.remove("hidden");
+      $("rateMe").textContent = "Você: " + m.name + " (avaliações ocultas)";
+
+      // ✅ lista todos os cadastrados (exceto você)
+      const sel = $("rateTarget");
+      sel.innerHTML = `<option value="">Selecione</option>`;
+      for(const p of Object.values(state.players||{})){
+        if(p.id === m.id) continue;
+        // (não filtramos por presença)
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.name;
+        sel.appendChild(opt);
+      }
+
+      window.__score = 8;
+      renderScoreButtons();
+    }
+    function closeRatingModal(){ $("ratingBack").classList.add("hidden"); }
+
+    function renderScoreButtons(){
+      const row = $("scoreRow");
+      row.innerHTML = "";
+      for(let n=MIN_NOTA; n<=MAX_NOTA; n++){
+        const btn = document.createElement("button");
+        btn.className = "px-3 py-2 rounded-lg border " + (window.__score===n ? "bg-gray-900 text-white border-gray-900" : "bg-white hover:bg-gray-50");
+        btn.textContent = String(n);
+        btn.onclick = ()=>{ window.__score = n; renderScoreButtons(); };
+        row.appendChild(btn);
+      }
+    }
+
+    async function sendRating(){
+      try{
+        const m = me();
+        if(!m) return;
+        // Não exigimos presença para avaliar (permite avaliar mesmo após "Nova rodada").
+        const targetId = $("rateTarget").value;
+        if(!targetId) return alert("Selecione quem avaliar.");
+        if(targetId === m.id) return alert("Você não pode se avaliar.");
+
+        const score = clamp(Number(window.__score || 8), MIN_NOTA, MAX_NOTA);
+        const id = m.id + "_" + targetId; // 1 nota por par (sobrescreve)
+        const rating = { id, raterId: m.id, targetId, score, createdAt: nowIso() };
+
+        await setRating(state.code, rating);
+        closeRatingModal();
+        setInfo("Avaliação enviada.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    // ===============================
+    // Compartilhar (admin) + Histórico + PNG
+    // ===============================
+    function buildTeamsPayloadFromCurrent(){
+      const playersArr = Object.values(state.players||{});
+      const byTarget = byTargetScores(state.ratings||{});
+
+      // ✅ só presentes e com time
+      const t1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1);
+      const t2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2);
+
+      const avg1 = teamAvg(t1, byTarget);
+      const avg2 = teamAvg(t2, byTarget);
+
+      const team1 = t1.map(p=>({
+        name: p.name,
+        position: p.position || "",
+        note: Number(computedNote(p, byTarget).toFixed(1))
+      }));
+      const team2 = t2.map(p=>({
+        name: p.name,
+        position: p.position || "",
+        note: Number(computedNote(p, byTarget).toFixed(1))
+      }));
+
+      return {
+        id: "",
+        code: String(state.code||"").toUpperCase(),
+        roundId: String(state.activeRoundId||""),
+        createdAt: nowIso(),
+        createdAtMs: Date.now(),
+        by: (me() ? me().name : ""),
+        avg1: Number(avg1.toFixed(2)),
+        avg2: Number(avg2.toFixed(2)),
+        team1,
+        team2
+      };
+    }
+
+    function formatTeamsText(payload){
+      const code = payload.code || "";
+      const when = fmtBR(payload.createdAtMs || payload.createdAt);
+      const team1 = payload.team1 || [];
+      const team2 = payload.team2 || [];
+      const avg1 = (payload.avg1 ?? 0).toFixed(2);
+      const avg2 = (payload.avg2 ?? 0).toFixed(2);
+
+      const left = [
+        `TIME 1 (média ${avg1})`,
+        ...team1.map(p => `${p.name}${p.position ? " ("+p.position+")" : ""} - ${Number(p.note).toFixed(1)}`)
+      ];
+      const right = [
+        `TIME 2 (média ${avg2})`,
+        ...team2.map(p => `${p.name}${p.position ? " ("+p.position+")" : ""} - ${Number(p.note).toFixed(1)}`)
+      ];
+
+      const width = Math.min(42, Math.max(...left.map(s=>s.length), 18));
+      const rows = Math.max(left.length, right.length);
+      const lines = [];
+      for(let i=0;i<rows;i++){
+        const L = (left[i] || "").padEnd(width, " ");
+        const R = (right[i] || "");
+        lines.push(L + " | " + R);
+      }
+
+      const header = `🏐 TIMES - ${code}\n🗓️ ${when}\n\n`;
+      const body = "```\n" + lines.join("\n") + "\n```";
+      return header + body;
+    }
+
+    async function copyToClipboard(text){
+      try{
+        await navigator.clipboard.writeText(text);
+        setInfo("Tabela copiada. Agora é só colar no WhatsApp.");
+      }catch{
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try{
+          document.execCommand("copy");
+          setInfo("Tabela copiada. Agora é só colar no WhatsApp.");
+        }catch{
+          alert("Não consegui copiar automaticamente. Selecione e copie manualmente.");
+        }
+        document.body.removeChild(ta);
+      }
+    }
+
+    function openWhatsAppWithText(text){
+      const url = "https://wa.me/?text=" + encodeURIComponent(text);
+      window.open(url, "_blank");
+    }
+
+    async function copyCurrentTeams(){
+      if(!session.admin) return alert("Somente o admin pode compartilhar/baixar.");
+      const payload = buildTeamsPayloadFromCurrent();
+      if((payload.team1.length + payload.team2.length) === 0) return alert("Ainda não há times montados para copiar.");
+      const text = formatTeamsText(payload);
+      await copyToClipboard(text);
+    }
+
+    function whatsCurrentTeams(){
+      if(!session.admin) return alert("Somente o admin pode compartilhar/baixar.");
+      const payload = buildTeamsPayloadFromCurrent();
+      if((payload.team1.length + payload.team2.length) === 0) return alert("Ainda não há times montados para enviar.");
+      const text = formatTeamsText(payload);
+      openWhatsAppWithText(text);
+    }
+
+    async function saveTeamsSnapshot(){
+      if(!session.admin) return alert("Somente o admin pode compartilhar/baixar.");
+      const code = String(state.code||"").toUpperCase();
+      if(!code) return;
+
+      const payload = buildTeamsPayloadFromCurrent();
+      if((payload.team1.length + payload.team2.length) === 0) return alert("Ainda não há times para salvar.");
+
+      const id = safeId();
+      payload.id = id;
+
+      try{
+        await snapshotsCol(code).doc(id).set(payload, { merge:false });
+        setInfo("Times salvos no histórico.");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    async function deleteSnapshot(id){
+      if(!session.admin) return;
+      const code = String(state.code||"").toUpperCase();
+      if(!confirm("Excluir este registro do histórico?")) return;
+      try{
+        await snapshotsCol(code).doc(id).delete();
+        setInfo("Registro excluído.");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    function snapshotTextById(id){
+      const s = state.snapshots && state.snapshots[id] ? state.snapshots[id] : null;
+      if(!s) return "";
+      return formatTeamsText(s);
+    }
+
+    function buildExportElement(payload){
+      const wrap = document.createElement("div");
+      wrap.style.width = "1100px";
+      wrap.style.background = "#ffffff";
+      wrap.style.padding = "24px";
+      wrap.style.borderRadius = "18px";
+      wrap.style.fontFamily = "system-ui,-apple-system,Segoe UI,Roboto,Arial";
+      wrap.style.color = "#111827";
+
+      const code = payload.code || "";
+      const when = fmtBR(payload.createdAtMs || payload.createdAt);
+      const avg1 = (payload.avg1 ?? 0).toFixed(2);
+      const avg2 = (payload.avg2 ?? 0).toFixed(2);
+
+      function col(title, color, avg, list){
+        const rows = (list||[]).map(p => `
+          <div style="border:1px solid #e5e7eb;border-radius:16px;padding:14px 16px;margin-bottom:12px;">
+            <div style="font-weight:800;font-size:18px;">${escapeHtml(p.name||"")}</div>
+            <div style="margin-top:4px;font-size:14px;color:#374151;">
+              ${escapeHtml(p.position||"")} · Nota ${Number(p.note||0).toFixed(1)}
+            </div>
+          </div>
+        `).join("") || `<div style="font-size:14px;color:#6b7280;">Vazio</div>`;
+
+        return `
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <div style="font-size:28px;font-weight:900;color:${color};">${title}</div>
+              <div style="font-size:16px;color:#374151;">Média: ${avg}</div>
+            </div>
+            ${rows}
+          </div>
+        `;
+      }
+
+      wrap.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:16px;">
+          <div style="font-size:30px;font-weight:950;">🏐 Manchette VolleyBall</div>
+          <div style="text-align:right;font-size:14px;color:#374151;">
+            <div><b>Código:</b> ${escapeHtml(code)}</div>
+            <div>${escapeHtml(when)}</div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+          ${col("Time 1", "#2563eb", avg1, payload.team1)}
+          ${col("Time 2", "#ea580c", avg2, payload.team2)}
+        </div>
+      `;
+      return wrap;
+    }
+
+    async function downloadTeamsPng(){
+      if(!session.admin) return alert("Somente o admin pode compartilhar/baixar.");
+      if(typeof html2canvas !== "function") return alert("Biblioteca de exportação não carregou. Recarregue a página.");
+      const payload = buildTeamsPayloadFromCurrent();
+      if((payload.team1.length + payload.team2.length) === 0) return alert("Ainda não há times para baixar.");
+
+      const temp = buildExportElement(payload);
+      temp.style.position = "fixed";
+      temp.style.left = "-10000px";
+      temp.style.top = "0";
+      document.body.appendChild(temp);
+
+      try{
+        const canvas = await html2canvas(temp, { scale: 2, backgroundColor: "#ffffff" });
+        const code = payload.code || "times";
+        const stamp = new Date().toISOString().slice(0,10);
+        canvas.toBlob((blob)=>{
+          if(!blob) return alert("Não consegui gerar o PNG.");
+          const a = document.createElement("a");
+          const url = URL.createObjectURL(blob);
+          a.href = url;
+          a.download = `times-${code}-${stamp}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(()=>URL.revokeObjectURL(url), 2000);
+          setInfo("PNG baixado.");
+        }, "image/png");
+      }catch(e){
+        alert("Falha ao gerar PNG: " + (e && e.message ? e.message : e));
+      }finally{
+        document.body.removeChild(temp);
+      }
+    }
+
+    // ===============================
+    // UI builders
+    // ===============================
+    function playerCard(p, byTarget, meId, isAdmin){
+      const note = computedNote(p, byTarget).toFixed(1);
+      const you = (meId && p.id===meId) ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const del = (isAdmin && (!meId || p.id!==meId)) ? `
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+          Remover
+        </button>` : "";
+      return `
+        <div class="rounded-xl border p-3 flex items-center justify-between gap-2 bg-white">
+          <div>
+            <div class="font-semibold">${escapeHtml(p.name)}</div>
+            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            ${you}
+            ${del}
+          </div>
+        </div>
+      `;
+    }
+
+    function waitingCard(p, byTarget, meId, isAdmin){
+      const note = computedNote(p, byTarget).toFixed(1);
+      const isMe = (meId && p.id===meId);
+      const del = (isAdmin && !isMe) ? `
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+          Remover
+        </button>` : "";
+      return `
+        <div class="rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
+          <div>
+            <div class="font-semibold">${escapeHtml(p.name)}</div>
+            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : "Apenas o próprio jogador escolhe."}</div>
+            ${del}
+          </div>
+        </div>
+      `;
+    }
+
+    function absentCard(p, byTarget, meId, isAdmin){
+      const note = computedNote(p, byTarget).toFixed(1);
+      const isMe = (meId && p.id===meId);
+      const you = isMe ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const del = (isAdmin && !isMe) ? `
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+          Remover
+        </button>` : "";
+      return `
+        <div class="rounded-xl border p-3 flex items-center justify-between gap-2 bg-white">
+          <div>
+            <div class="font-semibold">${escapeHtml(p.name)}</div>
+            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            ${you}
+            ${del}
+          </div>
+        </div>
+      `;
+    }
+
+    function render(){
+      const app = $("app");
+      const code = (state.code || "").toUpperCase();
+      const roundLabel = state.activeRoundAtMs ? fmtBR(state.activeRoundAtMs) : "";
+
+      const playersArr = Object.values(state.players||{});
+      const byTarget = byTargetScores(state.ratings||{});
+
+      const meObj = me();
+      const myNote = meObj ? computedNote(meObj, byTarget).toFixed(1) : "";
+      const myPresent = meObj ? isPresent(meObj.id) : false;
+      const myTeam = meObj ? teamOf(meObj.id) : null;
+
+      const presentPlayers = playersArr.filter(p=> isPresent(p.id));
+      const team1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1);
+
+      const team2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2);
+      const waiting = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)==null);
+      const absent = playersArr.filter(p=> !isPresent(p.id));
+      const team1Count = team1.length;
+      const team2Count = team2.length;
+      const totalAssigned = team1Count + team2Count;
+      const remaining1 = Math.max(0, TEAM_MAX - team1Count);
+      const remaining2 = Math.max(0, TEAM_MAX - team2Count);
+      const fullTeams = totalAssigned >= TEAM_MAX*2;
+
+
+      const t1Avg = teamAvg(team1, byTarget).toFixed(2);
+      const t2Avg = teamAvg(team2, byTarget).toFixed(2);
+      const bMsg = balanceMessage(team1, team2, byTarget);
+
+      const openBadge = state.open
+        ? `<span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">INSCRIÇÃO ABERTA</span>`
+        : `<span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-700">FECHADA</span>`;
+
+      app.innerHTML = `
+        <div class="bg-white rounded-2xl shadow p-4 sm:p-6">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h1 class="text-2xl sm:text-3xl font-extrabold text-gray-800">🏐 Manchette VolleyBall</h1>
+              <p class="text-sm text-gray-500">Rodada atual: <b>${escapeHtml(roundLabel || "—")}</b></p>
+              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}</div>
+            </div>
+
+            <div class="flex flex-wrap gap-2 items-center">
+              ${code ? `
+                <span class="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm">
+                  <span class="text-gray-500">Código:</span>
+                  <span class="font-semibold tracking-widest">${escapeHtml(code)}</span>
+                </span>
+                <button id="btnCopy" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Copiar</button>
+                <button id="btnLeave" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sair</button>
+              ` : ``}
+            </div>
+          </div>
+
+          ${state.info ? `
+            <div class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-200 text-sm text-blue-900">
+              ${escapeHtml(state.info)}
+            </div>
+          ` : ``}
+
+          ${state.syncError ? `
+            <div class="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">
+              <b>Erro:</b> ${escapeHtml(state.syncError)}<br/>
+              Se aparecer <b>Missing or insufficient permissions</b>, ajuste as Rules do Firestore no Firebase Console.
+            </div>
+          ` : ``}
+
+          ${!code ? `
+            <div class="mt-6 grid gap-3 sm:grid-cols-3">
+              <input id="roomCode" placeholder="Código da partida (ex.: A2K9ZP)" class="px-3 py-2 rounded-lg border sm:col-span-2" />
+              <div class="flex gap-2">
+                <button id="btnJoin" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">Entrar</button>
+                <button id="btnCreate" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Criar nova</button>
+              </div>
+            </div>
+            <div class="mt-3 text-sm text-gray-600">
+              Dica: use sempre o mesmo código da sala para manter as notas de semana a semana.
+            </div>
+          ` : `
+            <div class="mt-4 grid gap-4 lg:grid-cols-3">
+              <div class="lg:col-span-1 bg-white rounded-2xl border p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                  <h2 class="text-lg font-semibold">Inscrição</h2>
+                  ${openBadge}
+                </div>
+
+                <div class="grid gap-2">
+                  <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
+
+                  <div class="grid gap-1">
+                    <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
+                    <div class="grid grid-cols-2 gap-2">
+                      <select id="playerNote" class="px-3 py-2 rounded-lg border">
+                        <option value="5" selected>Minha nota 5</option>
+                        <option value="6">Minha nota 6</option>
+                        <option value="7">Minha nota 7</option>
+                        <option value="8">Minha nota 8</option>
+                        <option value="9">Minha nota 9</option>
+                        <option value="10">Minha nota 10</option>
+                      </select>
+                      <select id="playerPos" class="px-3 py-2 rounded-lg border">
+                        ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
+                      </select>
+                    </div>
+                  </div>
+
+                  <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+                    Entrar na lista
+                  </button>
+
+                  ${meObj ? `
+                    <div class="text-sm text-gray-700">
+                      Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
+                      ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
+                      ${myTeam ? ` · Time ${myTeam}` : ``}
+                    </div>
+<div class="mt-2 flex gap-2">
+  <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
+    Confirmar presença
+  </button>
+  <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
+    Marcar ausência
+  </button>
+</div>
+
+<div class="mt-2 grid grid-cols-2 gap-2">
+  <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
+    Adicionar jogador
+  </button>
+  ${session.prevPlayerId ? `
+    <button id="btnBackToMe2" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+      Voltar para meu jogador
+    </button>
+  ` : `
+    <button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>
+      Voltar para meu jogador
+    </button>
+  `}
+</div>
+
+<div class="mt-1 text-xs text-gray-600">
+  Dica: use <b>Adicionar jogador</b> para cadastrar alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
+</div>
+
+                    <div class="mt-3 rounded-xl border bg-white p-3">
+                      <div class="text-sm font-extrabold text-gray-800">Atualizar meu cadastro</div>
+                      <div class="mt-2">
+  <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
+</div>
+<div class="mt-2 grid grid-cols-2 gap-2">
+
+                        <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
+                          ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
+                        </select>
+                        <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
+                          ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"Coringa")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
+                        </select>
+                      </div>
+                      <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
+                        Salvar cadastro
+                      </button>
+                      <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
+                    </div>
+
+<div class="mt-3 rounded-xl border bg-white p-3">
+  <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
+  <div class="mt-1 text-xs text-gray-500">Use este código para entrar no mesmo cadastro em outro celular/PC.</div>
+  <div class="mt-2 flex items-center gap-2">
+    <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
+      ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
+    </div>
+    <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
+      Copiar
+    </button>
+  </div>
+  ${!meObj.accessCode ? `
+    <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
+      Gerar meu código
+    </button>
+  ` : ``}
+</div>
+                    <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
+                      Sair da lista
+                    </button>
+
+                    ${myPresent ? `
+                      <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
+                        🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
+                      </div>
+                    ` : `
+                      <div class="mt-2 text-sm text-gray-600">
+                        Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
+                      </div>
+                    `}
+                  ` : `
+                    ${session.prevPlayerId ? `
+                      <button id="btnBackToMe" class="w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+                        Voltar para meu jogador
+                      </button>
+                    ` : ``}
+<div class="mt-2 rounded-xl border bg-gray-50 p-3">
+
+  <div class="text-sm font-extrabold text-gray-800">Já se cadastrou?</div>
+  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar seu cadastro neste aparelho.</div>
+  <div class="mt-2 flex gap-2">
+    <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
+    <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
+  </div>
+</div>
+<div class="text-xs text-gray-500 mt-2">Dica: ao se cadastrar, anote seu Código do Jogador.</div>
+`}
+                </div>
+
+                <div class="border-t pt-3">
+                  <div class="grid gap-2">
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
+                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
+                    </div>
+
+                    <div class="text-xs text-gray-600">
+                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
+                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
+                      <span class="font-semibold">${waiting.length}</span> em espera
+                    </div>
+
+                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "" : "opacity-50 cursor-not-allowed"}" ${meObj ? "" : "disabled"}>Avaliar jogadores</button>
+                  </div>
+
+                  ${bMsg.text ? `
+                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
+                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
+                    </div>
+                  ` : ``}
+                </div>
+
+                <div class="border-t pt-3">
+                  <h3 class="font-semibold mb-2">Compartilhar</h3>
+
+                  ${session.admin ? `
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnCopyTeams" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Copiar tabela</button>
+                      <button id="btnWATeams" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>WhatsApp</button>
+                      <button id="btnDownloadPng" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Baixar lista</button>
+                      <button id="btnSaveTeams" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Salvar no histórico</button>
+                    </div>
+                    <div class="mt-2 text-xs text-gray-500">Somente admin. Copie/manda no WhatsApp (texto) ou baixar lista.</div>
+
+                    <div class="mt-4">
+                      <div class="flex items-center justify-between">
+                        <div class="font-semibold">Histórico (últimos 10)</div>
+                        <div class="text-xs text-gray-500">${Object.keys(state.snapshots||{}).length} salvo(s)</div>
+                      </div>
+
+                      ${Object.keys(state.snapshots||{}).length ? `
+                        <div class="mt-2 space-y-2">
+                          ${Object.values(state.snapshots||{}).sort((a,b)=>(b.createdAtMs||0)-(a.createdAtMs||0)).slice(0,3).map(s => `
+                            <div class="rounded-xl border p-3">
+                              <div class="flex items-center justify-between gap-2">
+                                <div class="text-sm font-semibold">${escapeHtml(fmtBR(s.createdAtMs || s.createdAt))}${s.by ? ` · ${escapeHtml(s.by)}` : ""}</div>
+                                <div class="flex flex-wrap gap-2">
+                                  <button data-snapcopy="${s.id}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">Copiar</button>
+                                  <button data-snapwa="${s.id}" class="px-2 py-1 rounded-lg bg-green-600 text-white hover:bg-green-700 text-xs font-semibold">WhatsApp</button>
+                                  <button data-snapdel="${s.id}" class="px-2 py-1 rounded-lg bg-red-600 text-white hover:bg-red-700 text-xs font-semibold">Excluir</button>
+                                </div>
+                              </div>
+
+                              <div class="mt-2 grid grid-cols-2 gap-3 text-xs text-gray-700">
+                                <div>
+                                  <div class="font-semibold text-blue-700">Time 1</div>
+                                  ${(s.team1||[]).length ? (s.team1||[]).map(p => `<div>${escapeHtml(p.name)} · ${Number(p.note).toFixed(1)}</div>`).join("") : `<div class="text-gray-500">Vazio</div>`}
+                                </div>
+                                <div>
+                                  <div class="font-semibold text-orange-700">Time 2</div>
+                                  ${(s.team2||[]).length ? (s.team2||[]).map(p => `<div>${escapeHtml(p.name)} · ${Number(p.note).toFixed(1)}</div>`).join("") : `<div class="text-gray-500">Vazio</div>`}
+                                </div>
+                              </div>
+                            </div>
+                          `).join("")}
+                        </div>
+                        <div class="mt-2 text-xs text-gray-500">Mostrando os 3 mais recentes.</div>
+                      ` : `
+                        <div class="mt-2 text-sm text-gray-500">Ainda não há times salvos.</div>
+                      `}
+                    </div>
+                  ` : `
+                    <div class="p-3 rounded-xl border bg-gray-50 text-sm text-gray-600">
+                      🔒 Somente o <b>admin</b> pode compartilhar (WhatsApp / Copiar) e Baixar Lista.
+                    </div>
+                  `}
+                </div>
+
+                <div class="border-t pt-3">
+                  <h3 class="font-semibold mb-2">Admin</h3>
+                  ${session.admin ? `
+                    <div class="text-sm text-green-700 font-semibold">✓ Admin ativo</div>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <button id="btnToggleOpen" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">${state.open ? "Fechar" : "Abrir"} inscrição</button>
+                      <button id="btnNewRound" class="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold">Nova rodada</button>
+                      <button id="btnSort" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sortear equilibrado</button>
+                      <button id="btnReset" class="px-3 py-2 rounded-lg bg-red-700 text-white hover:bg-red-800 font-semibold">Resetar</button>
+                      <button id="btnAdminOut" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sair admin</button>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-2">
+                      <b>Nova rodada</b>: todo mundo volta a <b>Ausente</b> e confirma presença novamente. <b>Resetar</b> zera tudo.
+                    </div>
+                  ` : `
+                    <div class="flex gap-2">
+                      <input id="adminPass" type="password" placeholder="Senha admin" class="px-3 py-2 rounded-lg border flex-1" />
+                      <button id="btnAdminIn" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Entrar</button>
+                    </div>
+                  `}
+                </div>
+              </div>
+
+              <div class="lg:col-span-2 grid gap-4 md:grid-cols-2">
+                <div class="bg-white rounded-2xl border p-4">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-xl font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
+                    <div class="text-sm text-gray-600">Média: ${t1Avg}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${team1.length ? team1.map(p => playerCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
+                  </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border p-4">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-xl font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
+                    <div class="text-sm text-gray-600">Média: ${t2Avg}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${team2.length ? team2.map(p => playerCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
+                  </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-lg font-semibold">Presentes · Aguardando escolha</h2>
+                    <div class="text-sm text-gray-600">Presentes: ${presentPlayers.length} · Total cadastrados: ${playersArr.length}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${waiting.length ? waiting.map(p => waitingCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém aguardando.</div>`}
+                  </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-lg font-semibold">Ausentes (rodada atual)</h2>
+                    <div class="text-sm text-gray-600">Ausentes: ${absent.length}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${absent.length ? absent.map(p => absentCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém ausente.</div>`}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      `;
+
+      // Wire events
+      if(code){
+        $("btnCopy").onclick = async ()=> {
+          try{ await navigator.clipboard.writeText(code); setInfo("Código copiado."); }
+          catch{ setInfo("Não foi possível copiar automaticamente."); }
+        };
+        $("btnLeave").onclick = ()=> leaveRoom();
+
+        if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
+        if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
+
+if($("btnCopyMyAccessCode")) $("btnCopyMyAccessCode").onclick = ()=> {
+  const m = me();
+  if(m && m.accessCode) copyText(String(m.accessCode));
+};
+if($("btnGenMyAccessCode")) $("btnGenMyAccessCode").onclick = async ()=> {
+  const m = me();
+  if(!m) return;
+  try{
+    const ac = await ensureAccessCodeForPlayer(state.code, m.id);
+    setInfo("Código gerado: " + ac);
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }
+};
+if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerByAccessCode();
+
+        if($("btnAddPlayer")) $("btnAddPlayer").onclick = ()=> startAddPlayer();
+        if($("btnBackToMe")) $("btnBackToMe").onclick = ()=> backToPrevPlayer();
+        if($("btnBackToMe2")) $("btnBackToMe2").onclick = ()=> backToPrevPlayer();
+
+        if($("btnSairLista")) $("btnSairLista").onclick = ()=> sairDaLista();
+
+        if($("btnPresent")) $("btnPresent").onclick = ()=> markPresence(true);
+        if($("btnAbsent")) $("btnAbsent").onclick = ()=> markPresence(false);
+
+        if($("btnRate")) $("btnRate").onclick = ()=> openRatingModal();
+        if($("btnTeam1")) $("btnTeam1").onclick = ()=> chooseTeam(1);
+        if($("btnTeam2")) $("btnTeam2").onclick = ()=> chooseTeam(2);
+
+        // Compartilhar (admin)
+        if($("btnCopyTeams")) $("btnCopyTeams").onclick = ()=> copyCurrentTeams();
+        if($("btnWATeams")) $("btnWATeams").onclick = ()=> whatsCurrentTeams();
+        if($("btnDownloadPng")) $("btnDownloadPng").onclick = ()=> downloadTeamsPng();
+        if($("btnSaveTeams")) $("btnSaveTeams").onclick = ()=> saveTeamsSnapshot();
+
+        document.querySelectorAll("[data-snapcopy]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const id = btn.getAttribute("data-snapcopy");
+            copyToClipboard(snapshotTextById(id));
+          });
+        });
+        document.querySelectorAll("[data-snapwa]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const id = btn.getAttribute("data-snapwa");
+            openWhatsAppWithText(snapshotTextById(id));
+          });
+        });
+        document.querySelectorAll("[data-snapdel]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const id = btn.getAttribute("data-snapdel");
+            deleteSnapshot(id);
+          });
+        });
+
+        if($("btnToggleOpen")) $("btnToggleOpen").onclick = ()=> toggleOpen();
+        if($("btnNewRound")) $("btnNewRound").onclick = ()=> newRound();
+        if($("btnSort")) $("btnSort").onclick = ()=> randomizeTeams();
+        if($("btnReset")) $("btnReset").onclick = ()=> resetCurrentRoom();
+
+        if($("btnAdminIn")) $("btnAdminIn").onclick = ()=> adminLogin();
+        if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
+
+        if(session.admin){
+          document.querySelectorAll("[data-del]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-del");
+              const nm = btn.getAttribute("data-name") || "Jogador";
+              adminRemovePlayer(pid, nm);
+            });
+          });
+        }
+  } else {
+    // Prefill do último código (não entra automaticamente)
+    if($("roomCode")){
+      const last = String(session.code || load(LS_LAST_CODE, "") || "").toUpperCase();
+      if(!$("roomCode").value) $("roomCode").value = last;
+    }
+    $("btnJoin").onclick = ()=> joinRoom();
+    $("btnCreate").onclick = ()=> createRoom();
+  }
+}
+
+    function wireModals(){
+      $("btnRateClose").onclick = ()=> closeRatingModal();
+      $("ratingBack").addEventListener("click", (e)=>{ if(e.target === $("ratingBack")) closeRatingModal(); });
+      $("btnSendRating").onclick = ()=> sendRating();
+    }
+
+    // ===============================
+    // Boot
+    // ===============================
+    (function boot(){
+      wireModals();
+
+      try{
+        firebase.initializeApp(firebaseConfig);
+        db = firebase.firestore();
+      }catch(e){
+        $("app").innerHTML = `
+          <div class="bg-white rounded-2xl shadow p-4 sm:p-6 text-red-700">
+            <b>Erro inicializando Firebase:</b> ${escapeHtml(e && e.message ? e.message : e)}<br/>
+            Confira se o firebaseConfig está correto.
+          </div>
+        `;
+        console.error(e);
+        return;
+      }
+
+      render();
+// Testes leves (console)
+      console.assert(median([5,6,7])===6, "median ímpar");
+      console.assert(median([5,6,7,8])===6.5, "median par");
+      const bm0 = balanceMessage([{id:"a",baseNote:7}], [], {});
+      console.assert(bm0.text==="", "não deveria alertar antes de 5 escolhas");
+
+      state.attendance = {};
+      console.assert(isPresent("x")==false, "default ausente");
+    })();
+  </script>
+
+  <!--
+  FIRESTORE RULES (MVP para TESTE)
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /matches/{code} {
+        allow read, write: if true;
+        match /{document=**} {
+          allow read, write: if true;
+        }
+      }
+    }
+  }
+  -->
+
+<script>
+  // PWA Service Worker
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(console.warn);
+    });
+  }
+</script>
+
+</body>
+</html>
