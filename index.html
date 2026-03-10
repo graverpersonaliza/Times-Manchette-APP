@@ -13,20 +13,16 @@
   <!-- Firebase (compat) -->
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-
-  <!-- PWA -->
-  <link rel="manifest" href="./manifest.json">
-  <meta name="theme-color" content="#111827">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="Vôlei no Sidney">
-  <link rel="apple-touch-icon" href="./icon-192.png">
-  <!-- /PWA -->
-
 </head>
 
 <body class="min-h-screen bg-gradient-to-br from-blue-50 to-orange-50">
+
+<!-- PWA Install Button -->
+<button id="btnInstallApp" class="fixed bottom-4 right-4 z-50 hidden px-4 py-3 rounded-xl shadow-lg bg-green-600 text-white font-semibold">
+  📲 Instalar App
+</button>
+<!-- /PWA Install Button -->
+
   <div id="app" class="p-4 sm:p-6 max-w-6xl mx-auto">
     <div class="text-center py-12">
       <p class="text-gray-600">Carregando...</p>
@@ -117,7 +113,12 @@
       snapshots: {},     // id -> snapshot
 
       syncError: "",
-      info: ""
+      info: "",
+
+      matchDate: "",
+      matchTime: "",
+      matchLocation: "",
+      closeBeforeMin: 15
     };
 
     let db = null;
@@ -185,7 +186,7 @@ async function claimPlayerByAccessCode(){
     session.playerId = doc.id;
     persistSession();
     if($("accessCodeInput")) $("accessCodeInput").value = "";
-    setInfo(`Cadastro recuperado: ${d.name || "Jogador"}.`);
+    setInfo(`Inscrição recuperada: ${d.name || "Jogador"}.`);
   }catch(e){
     setSyncError(e && e.message ? e.message : e);
   }
@@ -217,6 +218,13 @@ async function copyText(text){
         "&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"
       }[c]));
     }
+
+
+function safeBoldInfo(s){
+  // Permite apenas <b> e </b> no texto de info; todo o resto permanece escapado
+  const e = escapeHtml(s||"");
+  return e.replace(/&lt;b&gt;/g, "<b>").replace(/&lt;\/b&gt;/g, "</b>");
+}
     function save(key, value){ try{ localStorage.setItem(key, JSON.stringify(value)); }catch{} }
     function load(key, fallback){
       try{
@@ -237,10 +245,117 @@ async function copyText(text){
       }catch{ return ""; }
     }
 
+
+function buildScheduleMs(dateStr, timeStr){
+  if(!dateStr || !timeStr) return 0;
+  try{
+    const [y,m,d] = String(dateStr).split("-").map(Number);
+    const [hh,mm] = String(timeStr).split(":").map(Number);
+    const dt = new Date(y||0, (m||1)-1, d||1, hh||0, mm||0, 0, 0);
+    const ms = dt.getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  }catch{ return 0; }
+}
+
+function fmtCountdown(diffMs){
+  const diff = Number(diffMs||0);
+  if(!Number.isFinite(diff) || diff <= 0) return "agora";
+  const totalMin = Math.ceil(diff / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  const parts = [];
+  if(d) parts.push(`${d}d`);
+  if(h) parts.push(`${h}h`);
+  if(m || !parts.length) parts.push(`${m}min`);
+  return parts.join(" ");
+}
+
+function getMatchScheduleMeta(){
+  const matchMs = buildScheduleMs(state.matchDate, state.matchTime);
+  if(!matchMs) return { hasSchedule:false, hasClose:false, closeBeforeMin: Math.max(0, Number(state.closeBeforeMin||15)) };
+  const closeBeforeMin = Math.max(0, Number(state.closeBeforeMin||15));
+  const closeMs = matchMs - (closeBeforeMin * 60000);
+  return {
+    hasSchedule: true,
+    hasClose: true,
+    matchMs,
+    closeMs,
+    closeBeforeMin,
+    matchLabel: fmtBR(matchMs),
+    closeLabel: fmtBR(closeMs),
+    countdownLabel: fmtCountdown(matchMs - nowMs())
+  };
+}
+
+async function maybeAutoCloseSchedule(){
+  try{
+    const code = String(state.code||"").toUpperCase();
+    if(!code || !state.open) return;
+    const meta = getMatchScheduleMeta();
+    if(!meta.hasSchedule) return;
+    if(nowMs() >= meta.closeMs){
+      await metaUpdate(code, { open:false });
+    }
+  }catch{}
+}
+
+async function saveMatchSchedule(){
+  if(!session.admin) return alert("Somente admin.");
+  const code = String(state.code||"").toUpperCase();
+  if(!code) return alert("Entre em uma sala primeiro (código da partida).");
+  const matchDate = (document.getElementById("matchDate")?.value || "").trim();
+  const matchTime = (document.getElementById("matchTime")?.value || "").trim();
+  const matchLocation = (document.getElementById("matchLocation")?.value || "").trim();
+  const closeBeforeMin = Math.max(0, Number(document.getElementById("closeBeforeMin")?.value || 15));
+  if(!matchDate || !matchTime) return alert("Informe a data e a hora da partida.");
+  await metaUpdate(code, { matchDate, matchTime, matchLocation, closeBeforeMin });
+  state.matchDate = matchDate;
+  state.matchTime = matchTime;
+  state.matchLocation = matchLocation;
+  state.closeBeforeMin = closeBeforeMin;
+  setInfo("Horário da partida salvo.");
+  maybeAutoCloseSchedule();
+  render();
+}
+
+async function clearMatchSchedule(){
+  if(!session.admin) return alert("Somente admin.");
+  const code = String(state.code||"").toUpperCase();
+  if(!code) return alert("Entre em uma sala primeiro (código da partida).");
+  await metaUpdate(code, { matchDate: "", matchTime: "", matchLocation: "", closeBeforeMin: 15 });
+  state.matchDate = "";
+  state.matchTime = "";
+  state.matchLocation = "";
+  state.closeBeforeMin = 15;
+  setInfo("Horário da partida limpo.");
+  render();
+}
+
     function me(){
       if(!session.playerId) return null;
       return state.players && state.players[session.playerId] ? state.players[session.playerId] : null;
     }
+
+async function ensureMeLoaded(){
+  const m = me();
+  if(m) return m;
+  const code = state.code;
+  const pid = session.playerId;
+  if(!code || !pid || !db) return null;
+  try{
+    const snap = await playersCol(code).doc(pid).get();
+    if(snap.exists){
+      state.players[pid] = snap.data();
+      render();
+      return state.players[pid];
+    }
+  }catch(e){
+    // ignore
+  }
+  return null;
+}
+
 
     function isPresent(playerId){
       const a = state.attendance && state.attendance[playerId];
@@ -365,6 +480,11 @@ async function copyText(text){
         const d = snap.exists ? snap.data() : null;
         if(d && typeof d.open === "boolean") state.open = d.open;
 
+        state.matchDate = d && d.matchDate ? String(d.matchDate) : "";
+        state.matchTime = d && d.matchTime ? String(d.matchTime) : "";
+        state.matchLocation = d && d.matchLocation ? String(d.matchLocation) : "";
+        state.closeBeforeMin = d && d.closeBeforeMin != null ? Math.max(0, Number(d.closeBeforeMin)) : 15;
+
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
         const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
 
@@ -376,6 +496,7 @@ async function copyText(text){
           state.activeRoundAtMs = nextAt || state.activeRoundAtMs;
         }
 
+        maybeAutoCloseSchedule();
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
 
@@ -512,7 +633,7 @@ attachRoom(code);
         persistSession();
 await ensureRoom(code);
         attachRoom(code);
-        setInfo("Entrou na sala. Agora cadastre seu nome.");
+        setInfo("<b>Entrou na sala, Agora inscreva seu nome ou entre com seu codigo do jogador</b>");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -543,6 +664,13 @@ await ensureRoom(code);
         const code = state.code;
         if(!code) return;
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+
+        // Bloqueia nova inscrição quando já está logado neste aparelho
+        const already = me();
+        if(already){
+          return alert("Você já está logado. Para mudar seus dados use 'Atualizar minha inscrição' ou 'Sair da lista'. Para inscrever outra pessoa, use 'Adicionar jogador'.");
+        }
+
         const name = ($("playerName")?.value || "").trim();
         const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
         const position = ($("playerPos")?.value || "Coringa");
@@ -573,6 +701,73 @@ await ensureRoom(code);
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
+async function registerMeSendWhatsApp(){
+  // Abre uma janela antes (evita bloqueio de popup em alguns navegadores)
+  const pre = window.open("about:blank", "_blank");
+
+  try{
+    const code = state.code;
+    if(!code){ if(pre) pre.close(); return alert("Entre na sala primeiro (código da partida)."); }
+    if(!state.activeRoundId){ if(pre) pre.close(); return alert("Rodada não carregou. Recarregue a página."); }
+
+    // ✅ Se já está logado: apenas envia os dados no WhatsApp (não cadastra de novo)
+    const logged = me();
+    if(logged){
+      let accessCode = logged.accessCode;
+      if(!accessCode){
+        // gera se estiver vazio (caso antigo)
+        accessCode = await ensureAccessCodeForPlayer(code, logged.id);
+      }
+      const msg = buildInviteMessage(logged.name || "Jogador", String(code).toUpperCase(), String(accessCode));
+      const url = "https://wa.me/?text=" + encodeURIComponent(msg);
+      if(pre) pre.location.href = url;
+      else window.open(url, "_blank");
+      setInfo("WhatsApp aberto com sua mensagem pronta. Agora é só tocar em ENVIAR.");
+      return;
+    }
+
+    // ✅ Se NÃO está logado: cadastra e já abre WhatsApp
+    const name = ($("playerName")?.value || "").trim();
+    const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
+    const position = ($("playerPos")?.value || "Coringa");
+
+    if(!name) { if(pre) pre.close(); return alert("Digite seu nome."); }
+    if(!state.open) { if(pre) pre.close(); return alert("Inscrição fechada."); }
+
+    const id = safeId();
+    const accessCode = genPlayerCode(10);
+
+    const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
+
+    session.playerId = id;
+    persistSession();
+
+    await setPlayer(code, player);
+
+    await setAttendance(code, state.activeRoundId, id, {
+      present: true,
+      team: null,
+      checkedInAtMs: nowMs(),
+      updatedAt: nowIso()
+    });
+
+    // limpa campos
+    if($("playerName")) $("playerName").value = "";
+
+    // monta mensagem e abre WhatsApp
+    const msg = buildInviteMessage(name, String(code).toUpperCase(), accessCode);
+    const url = "https://wa.me/?text=" + encodeURIComponent(msg);
+    if(pre) pre.location.href = url;
+    else window.open(url, "_blank");
+
+    setInfo("Inscrição criada. Código do Jogador: " + accessCode + " — WhatsApp aberto com a mensagem pronta. Agora é só tocar em ENVIAR.");
+  }catch(e){
+    if(pre) try{ pre.close(); }catch{}
+    setSyncError(e && e.message ? e.message : e);
+  }
+}
+
+
     async function updateMyProfile(){
       const code = state.code;
       const m = me();
@@ -585,7 +780,7 @@ await ensureRoom(code);
         const position = ($("myPosSelect")?.value || m.position || "Coringa");
 
         await setPlayer(code, { id: m.id, name, baseNote, position, updatedAt: nowIso() });
-        setInfo("Cadastro atualizado (nome/nota/posição).");
+        setInfo("Inscrição atualizada (nome/nota/posição).");
       }catch(e){
         setSyncError(e && e.message ? e.message : e);
       }
@@ -603,7 +798,7 @@ function startAddPlayer(){
   if($("playerName")) $("playerName").value = "";
   if($("playerNote")) $("playerNote").value = "5";
   if($("playerPos")) $("playerPos").value = "Coringa";
-  setInfo("Modo adicionar jogador: cadastre a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
+  setInfo("Modo adicionar jogador: inscreva a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
   render();
   try{ window.scrollTo({top: 0, behavior: "smooth"}); }catch{ window.scrollTo(0,0); }
 }
@@ -613,14 +808,20 @@ function backToPrevPlayer(){
   session.playerId = session.prevPlayerId;
   session.prevPlayerId = "";
   persistSession();
+  // Reanexa listeners para garantir que times/presença não "sumam" ao trocar de jogador
+  if(state.code) attachRoom(state.code);
   setInfo("Você voltou para seu jogador.");
   render();
 }
 
 async function markPresence(present){
       const code = state.code;
-      const m = me();
-      if(!code || !m) return;
+      let m = me();
+      if(!code) return alert("Entre na sala primeiro (código da partida).");
+      if(!m){
+        m = await ensureMeLoaded();
+        if(!m) return alert("Sua inscrição ainda não carregou. Aguarde 1 segundo e tente novamente.");
+      }
       if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
       if(!state.open) return alert("Inscrição fechada.");
 
@@ -631,7 +832,7 @@ async function markPresence(present){
           checkedInAtMs: present ? nowMs() : null,
           updatedAt: nowIso()
         });
-        setInfo(present ? "Presença confirmada. Agora escolha seu time." : "Ausência marcada para esta rodada.");
+        setInfo(present ? "<b>Presença confirmada. Agora escolha seu time</b>" : "Ausência marcada para esta rodada.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -652,8 +853,9 @@ async function markPresence(present){
 
     async function chooseTeam(team){
       try{
-        const m = me();
-        if(!m) return alert("Cadastre-se para escolher time.");
+        let m = me();
+        if(!m){ m = await ensureMeLoaded(); }
+        if(!m) return alert("Inscreva-se para escolher time.");
         if(!state.open) return alert("Inscrição fechada.");
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
         if(!isPresent(m.id)) return alert("Confirme presença antes de escolher time.");
@@ -809,7 +1011,7 @@ async function randomizeTeams(){
     // ===============================
     function openRatingModal(){
       const m = me();
-      if(!m) return alert("Cadastre-se para avaliar.");
+      if(!m) return alert("Inscreva-se para avaliar.");
       // Não exigimos presença para avaliar (permite avaliar mesmo após "Nova rodada").
 
       $("ratingBack").classList.remove("hidden");
@@ -895,6 +1097,8 @@ async function randomizeTeams(){
         createdAt: nowIso(),
         createdAtMs: Date.now(),
         by: (me() ? me().name : ""),
+        matchLabel: getMatchScheduleMeta().hasSchedule ? getMatchScheduleMeta().matchLabel : "",
+        matchLocation: state.matchLocation || "",
         avg1: Number(avg1.toFixed(2)),
         avg2: Number(avg2.toFixed(2)),
         team1,
@@ -904,7 +1108,6 @@ async function randomizeTeams(){
 
     function formatTeamsText(payload){
       const code = payload.code || "";
-      const when = fmtBR(payload.createdAtMs || payload.createdAt);
       const team1 = payload.team1 || [];
       const team2 = payload.team2 || [];
       const avg1 = (payload.avg1 ?? 0).toFixed(2);
@@ -958,6 +1161,53 @@ async function randomizeTeams(){
       const url = "https://wa.me/?text=" + encodeURIComponent(text);
       window.open(url, "_blank");
     }
+
+    function baseSiteUrl(){
+      try{
+        return (location.origin || "") + (location.pathname || "");
+      }catch{
+        return "";
+      }
+    }
+
+    function buildInviteMessage(nome, sala, codigoJogador){
+  const sched = getMatchScheduleMeta();
+  const lines = [
+    `VÔLEI NO SIDNEY`,
+    `SEU ACESSO `,
+    `Nome: ${nome}`,
+    `Sala: ${sala}`,
+    `Código do Jogador: ${codigoJogador}`
+  ];
+
+  if(sched.hasSchedule){
+    lines.push(`PARTIDA: ${sched.matchLabel}`);
+  }
+  if(state.matchLocation){
+    lines.push(`LOCAL: ${state.matchLocation}`);
+  }
+
+  lines.push(
+    `COMO USAR (rápido): `,
+    `1) Abra o site`,
+    ` 2) Clique em ENTRAR e digite o código da sala: ${sala}`,
+    `3) Em "Já se inscreveu?", digite o seu Código do Jogador: ${codigoJogador}`,
+    `4) Confirme PRESENÇA `,
+    `5) Escolha o TIME (1 ou 2) `,
+    `6) Avalie jogadores (nota oculta 5–10) `,
+    `DICA: - A "Minha nota" é sua autoavaliação (5–10). - Você pode atualizar depois em "Atualizar minha inscrição".`
+  );
+
+  return lines.join("\n");
+}
+
+
+function openWhatsApp(text, numberDigits){
+  const base = numberDigits ? ("https://wa.me/" + numberDigits + "?text=") : "https://wa.me/?text=";
+  window.open(base + encodeURIComponent(text), "_blank");
+}
+
+
 
     async function copyCurrentTeams(){
       if(!session.admin) return alert("Somente o admin pode compartilhar/baixar.");
@@ -1022,7 +1272,8 @@ async function randomizeTeams(){
       wrap.style.color = "#111827";
 
       const code = payload.code || "";
-      const when = fmtBR(payload.createdAtMs || payload.createdAt);
+      const matchLabel = payload.matchLabel || "";
+      const matchLocation = payload.matchLocation || "";
       const avg1 = (payload.avg1 ?? 0).toFixed(2);
       const avg2 = (payload.avg2 ?? 0).toFixed(2);
 
@@ -1052,7 +1303,8 @@ async function randomizeTeams(){
           <div style="font-size:30px;font-weight:950;">🏐 Manchette VolleyBall</div>
           <div style="text-align:right;font-size:14px;color:#374151;">
             <div><b>Código:</b> ${escapeHtml(code)}</div>
-            <div>${escapeHtml(when)}</div>
+            ${matchLabel ? `<div><b>Partida:</b> ${escapeHtml(matchLabel)}</div>` : ``}
+            ${matchLocation ? `<div><b>Local:</b> ${escapeHtml(matchLocation)}</div>` : ``}
           </div>
         </div>
 
@@ -1104,16 +1356,16 @@ async function randomizeTeams(){
     // ===============================
     function playerCard(p, byTarget, meId, isAdmin){
       const note = computedNote(p, byTarget).toFixed(1);
-      const you = (meId && p.id===meId) ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const you = (meId && p.id===meId) ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
       const del = (isAdmin && (!meId || p.id!==meId)) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
           Remover
         </button>` : "";
       return `
-        <div class="rounded-xl border p-3 flex items-center justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex items-center justify-between gap-2 bg-white">
           <div>
-            <div class="font-semibold">${escapeHtml(p.name)}</div>
-            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex items-center gap-2">
             ${you}
@@ -1127,14 +1379,14 @@ async function randomizeTeams(){
       const note = computedNote(p, byTarget).toFixed(1);
       const isMe = (meId && p.id===meId);
       const del = (isAdmin && !isMe) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
           Remover
         </button>` : "";
       return `
-        <div class="rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
-            <div class="font-semibold">${escapeHtml(p.name)}</div>
-            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex items-center gap-2">
             <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : "Apenas o próprio jogador escolhe."}</div>
@@ -1147,16 +1399,16 @@ async function randomizeTeams(){
     function absentCard(p, byTarget, meId, isAdmin){
       const note = computedNote(p, byTarget).toFixed(1);
       const isMe = (meId && p.id===meId);
-      const you = isMe ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const you = isMe ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
       const del = (isAdmin && !isMe) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
           Remover
         </button>` : "";
       return `
-        <div class="rounded-xl border p-3 flex items-center justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex items-center justify-between gap-2 bg-white">
           <div>
-            <div class="font-semibold">${escapeHtml(p.name)}</div>
-            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex items-center gap-2">
             ${you}
@@ -1170,6 +1422,10 @@ async function randomizeTeams(){
       const app = $("app");
       const code = (state.code || "").toUpperCase();
       const roundLabel = state.activeRoundAtMs ? fmtBR(state.activeRoundAtMs) : "";
+      const scheduleMeta = getMatchScheduleMeta();
+      const matchLabel = scheduleMeta.hasSchedule ? scheduleMeta.matchLabel : "";
+      const closeLabel = scheduleMeta.hasClose ? scheduleMeta.closeLabel : "";
+      const countdownLabel = scheduleMeta.hasSchedule ? scheduleMeta.countdownLabel : "";
 
       const playersArr = Object.values(state.players||{});
       const byTarget = byTargetScores(state.ratings||{});
@@ -1207,6 +1463,14 @@ async function randomizeTeams(){
             <div>
               <h1 class="text-2xl sm:text-3xl font-extrabold text-gray-800">🏐 Manchette VolleyBall</h1>
               <p class="text-sm text-gray-500">Rodada atual: <b>${escapeHtml(roundLabel || "—")}</b></p>
+              ${scheduleMeta.hasSchedule ? `
+                <div class="mt-1 space-y-1 text-sm text-gray-600">
+                  <div>⏰ Próxima partida: <b>${escapeHtml(matchLabel)}</b></div>
+                  ${state.matchLocation ? `<div>📍 Local: <b>${escapeHtml(state.matchLocation)}</b></div>` : ``}
+                  <div>🕒 Inscrições até: <b>${escapeHtml(closeLabel)}</b></div>
+                  <div>⌛ Faltam <b>${escapeHtml(countdownLabel)}</b></div>
+                </div>
+              ` : ``}
               <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}</div>
             </div>
 
@@ -1224,7 +1488,7 @@ async function randomizeTeams(){
 
           ${state.info ? `
             <div class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-200 text-sm text-blue-900">
-              ${escapeHtml(state.info)}
+              ${safeBoldInfo(state.info)}
             </div>
           ` : ``}
 
@@ -1255,12 +1519,12 @@ async function randomizeTeams(){
                 </div>
 
                 <div class="grid gap-2">
-                  <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
+                  <input id="playerName" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"} placeholder="Seu nome" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" />
 
                   <div class="grid gap-1">
                     <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
                     <div class="grid grid-cols-2 gap-2">
-                      <select id="playerNote" class="px-3 py-2 rounded-lg border">
+                      <select id="playerNote" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>
                         <option value="5" selected>Minha nota 5</option>
                         <option value="6">Minha nota 6</option>
                         <option value="7">Minha nota 7</option>
@@ -1268,17 +1532,23 @@ async function randomizeTeams(){
                         <option value="9">Minha nota 9</option>
                         <option value="10">Minha nota 10</option>
                       </select>
-                      <select id="playerPos" class="px-3 py-2 rounded-lg border">
+                      <select id="playerPos" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>
                         ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
                       </select>
                     </div>
                   </div>
-
-                  <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+<button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(!meObj && state.open) ? "" : "opacity-50 cursor-not-allowed"}" ${(!meObj && state.open) ? "" : "disabled"}>
                     Entrar na lista
                   </button>
 
+<button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${((!meObj && state.open) || meObj) ? "" : "opacity-50 cursor-not-allowed"}" ${((!meObj && state.open) || meObj) ? "" : "disabled"}>
+  ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}
+</button>
+
+
                   ${meObj ? `
+                    <div class="text-xs text-gray-600">Você já está logado. Para inscrever outra pessoa, use <b>Adicionar jogador</b>.</div>
+
                     <div class="text-sm text-gray-700">
                       Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
                       ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
@@ -1309,11 +1579,39 @@ async function randomizeTeams(){
 </div>
 
 <div class="mt-1 text-xs text-gray-600">
-  Dica: use <b>Adicionar jogador</b> para cadastrar alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
+  Dica: use <b>Adicionar jogador</b> para inscrever alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
 </div>
 
-                    <div class="mt-3 rounded-xl border bg-white p-3">
-                      <div class="text-sm font-extrabold text-gray-800">Atualizar meu cadastro</div>
+                    <div class="border-t pt-3">
+                  <div class="grid gap-2">
+                                          <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
+                                            🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
+                                          </div>
+                    
+
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
+                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
+                    </div>
+
+                    <div class="text-xs text-gray-600">
+                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
+                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
+                      <span class="font-semibold">${waiting.length}</span> em espera
+                    </div>
+
+                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>Avaliar jogadores</button>
+                  </div>
+
+                  ${bMsg.text ? `
+                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
+                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
+                    </div>
+                  ` : ``}
+                </div>
+
+<div class="mt-3 rounded-xl border bg-white p-3">
+                      <div class="text-sm font-extrabold text-gray-800">Atualizar minha inscrição</div>
                       <div class="mt-2">
   <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
 </div>
@@ -1327,14 +1625,14 @@ async function randomizeTeams(){
                         </select>
                       </div>
                       <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
-                        Salvar cadastro
+                        Salvar inscrição
                       </button>
                       <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
                     </div>
 
 <div class="mt-3 rounded-xl border bg-white p-3">
   <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
-  <div class="mt-1 text-xs text-gray-500">Use este código para entrar no mesmo cadastro em outro celular/PC.</div>
+  <div class="mt-1 text-xs text-gray-500">Use este código para entrar na mesma inscrição em outro celular/PC.</div>
   <div class="mt-2 flex items-center gap-2">
     <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
       ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
@@ -1342,7 +1640,9 @@ async function randomizeTeams(){
     <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
       Copiar
     </button>
-  </div>
+</div>
+</div>
+
   ${!meObj.accessCode ? `
     <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
       Gerar meu código
@@ -1354,10 +1654,7 @@ async function randomizeTeams(){
                     </button>
 
                     ${myPresent ? `
-                      <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
-                        🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
-                      </div>
-                    ` : `
+` : `
                       <div class="mt-2 text-sm text-gray-600">
                         Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
                       </div>
@@ -1370,39 +1667,18 @@ async function randomizeTeams(){
                     ` : ``}
 <div class="mt-2 rounded-xl border bg-gray-50 p-3">
 
-  <div class="text-sm font-extrabold text-gray-800">Já se cadastrou?</div>
-  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar seu cadastro neste aparelho.</div>
+  <div class="text-sm font-extrabold text-gray-800">Já se inscreveu?</div>
+  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar sua inscrição neste aparelho.</div>
   <div class="mt-2 flex gap-2">
     <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
     <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
   </div>
 </div>
-<div class="text-xs text-gray-500 mt-2">Dica: ao se cadastrar, anote seu Código do Jogador.</div>
+<div class="text-xs text-gray-500 mt-2">Dica: ao se inscrever, anote seu Código do Jogador.</div>
 `}
                 </div>
 
-                <div class="border-t pt-3">
-                  <div class="grid gap-2">
-                    <div class="flex flex-wrap gap-2">
-                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
-                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
-                    </div>
-
-                    <div class="text-xs text-gray-600">
-                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
-                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
-                      <span class="font-semibold">${waiting.length}</span> em espera
-                    </div>
-
-                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "" : "opacity-50 cursor-not-allowed"}" ${meObj ? "" : "disabled"}>Avaliar jogadores</button>
-                  </div>
-
-                  ${bMsg.text ? `
-                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
-                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
-                    </div>
-                  ` : ``}
-                </div>
+                
 
                 <div class="border-t pt-3">
                   <h3 class="font-semibold mb-2">Compartilhar</h3>
@@ -1474,6 +1750,29 @@ async function randomizeTeams(){
                     <div class="text-xs text-gray-500 mt-2">
                       <b>Nova rodada</b>: todo mundo volta a <b>Ausente</b> e confirma presença novamente. <b>Resetar</b> zera tudo.
                     </div>
+                    <div class="mt-3 rounded-xl border p-3 bg-gray-50">
+                      <div class="text-sm font-semibold">Horário da partida</div>
+                      <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                        <input id="matchDate" type="date" value="${escapeHtml(state.matchDate || "")}" class="px-3 py-2 rounded-lg border" />
+                        <input id="matchTime" type="time" value="${escapeHtml(state.matchTime || "")}" class="px-3 py-2 rounded-lg border" />
+                      </div>
+                      <div class="mt-2">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">Local</label>
+                        <input id="matchLocation" type="text" maxlength="20" value="${escapeHtml(state.matchLocation || "")}" class="px-3 py-2 rounded-lg border w-full" placeholder="Local" />
+                      </div>
+                      <div class="mt-2">
+                        <div class="flex items-center gap-2">
+                          <span class="text-sm font-semibold text-gray-600">Fecha em</span>
+                          <input id="closeBeforeMin" type="number" min="0" step="5" value="${escapeHtml(String(state.closeBeforeMin ?? 15))}" class="px-3 py-2 rounded-lg border w-28" placeholder="0" />
+                          <span class="text-sm font-semibold text-gray-600">m</span>
+                        </div>
+                      </div>
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <button id="btnSaveSchedule" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Salvar horário</button>
+                        <button id="btnClearSchedule" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Limpar horário</button>
+                      </div>
+                      <div class="mt-2 text-xs text-gray-500">O sistema mostra a contagem regressiva e fecha a inscrição automaticamente no prazo definido.</div>
+                    </div>
                   ` : `
                     <div class="flex gap-2">
                       <input id="adminPass" type="password" placeholder="Senha admin" class="px-3 py-2 rounded-lg border flex-1" />
@@ -1484,42 +1783,42 @@ async function randomizeTeams(){
               </div>
 
               <div class="lg:col-span-2 grid gap-4 md:grid-cols-2">
-                <div class="bg-white rounded-2xl border p-4">
+                <div class="bg-white rounded-2xl border p-3">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-xl font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
+                    <h2 class="text-lg font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t1Avg}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${team1.length ? team1.map(p => playerCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
                   </div>
                 </div>
 
-                <div class="bg-white rounded-2xl border p-4">
+                <div class="bg-white rounded-2xl border p-3">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-xl font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
+                    <h2 class="text-lg font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t2Avg}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${team2.length ? team2.map(p => playerCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
                   </div>
                 </div>
 
-                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                <div class="bg-white rounded-2xl border p-3 md:col-span-2">
                   <div class="flex items-center justify-between">
                     <h2 class="text-lg font-semibold">Presentes · Aguardando escolha</h2>
                     <div class="text-sm text-gray-600">Presentes: ${presentPlayers.length} · Total cadastrados: ${playersArr.length}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${waiting.length ? waiting.map(p => waitingCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém aguardando.</div>`}
                   </div>
                 </div>
 
-                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                <div class="bg-white rounded-2xl border p-3 md:col-span-2">
                   <div class="flex items-center justify-between">
                     <h2 class="text-lg font-semibold">Ausentes (rodada atual)</h2>
                     <div class="text-sm text-gray-600">Ausentes: ${absent.length}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${absent.length ? absent.map(p => absentCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém ausente.</div>`}
                   </div>
                 </div>
@@ -1538,6 +1837,7 @@ async function randomizeTeams(){
         $("btnLeave").onclick = ()=> leaveRoom();
 
         if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
+        if($("btnRegisterSendWA")) $("btnRegisterSendWA").onclick = ()=> registerMeSendWhatsApp();
         if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
 
 if($("btnCopyMyAccessCode")) $("btnCopyMyAccessCode").onclick = ()=> {
@@ -1601,6 +1901,8 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
 
         if($("btnAdminIn")) $("btnAdminIn").onclick = ()=> adminLogin();
         if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
+        if($("btnSaveSchedule")) $("btnSaveSchedule").onclick = ()=> saveMatchSchedule();
+        if($("btnClearSchedule")) $("btnClearSchedule").onclick = ()=> clearMatchSchedule();
 
         if(session.admin){
           document.querySelectorAll("[data-del]").forEach(btn=>{
@@ -1632,6 +1934,22 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
     // Boot
     // ===============================
     (function boot(){
+
+// Mostra erros de JS na tela (para evitar ficar só "Carregando...")
+window.addEventListener("error", (ev)=>{
+  try{
+    const msg = (ev && ev.message) ? ev.message : String(ev);
+    setSyncError("Erro de JavaScript: " + msg);
+  }catch{}
+});
+window.addEventListener("unhandledrejection", (ev)=>{
+  try{
+    const msg = (ev && ev.reason && ev.reason.message) ? ev.reason.message : String(ev.reason || ev);
+    setSyncError("Promise rejeitada: " + msg);
+  }catch{}
+});
+
+
       wireModals();
 
       try{
@@ -1649,6 +1967,12 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
       }
 
       render();
+      setInterval(()=>{
+        if(state.code){
+          maybeAutoCloseSchedule();
+          render();
+        }
+      }, 30000);
 // Testes leves (console)
       console.assert(median([5,6,7])===6, "median ímpar");
       console.assert(median([5,6,7,8])===6.5, "median par");
@@ -1676,11 +2000,49 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
   -->
 
 <script>
-  // PWA Service Worker
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("./sw.js").catch(console.warn);
+  // PWA install prompt (Android/Chrome/Edge)
+  let deferredInstallPrompt = null;
+  const btnInstall = document.getElementById("btnInstallApp");
+
+  function isIos() {
+    return /iphone|ipad|ipod/i.test(navigator.userAgent);
+  }
+  function isStandalone() {
+    return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone;
+  }
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    if (btnInstall && !isStandalone()) btnInstall.classList.remove("hidden");
+  });
+
+  window.addEventListener("appinstalled", () => {
+    deferredInstallPrompt = null;
+    if (btnInstall) btnInstall.classList.add("hidden");
+  });
+
+  if (btnInstall) {
+    btnInstall.addEventListener("click", async () => {
+      if (isIos()) {
+        alert("No iPhone: abra no Safari > Compartilhar > Adicionar à Tela de Início.");
+        return;
+      }
+      if (!deferredInstallPrompt) {
+        alert("Instalação ainda não disponível. Tente no Chrome/Edge e aguarde alguns segundos.");
+        return;
+      }
+      btnInstall.classList.add("hidden");
+      deferredInstallPrompt.prompt();
+      try { await deferredInstallPrompt.userChoice; } catch (_) {}
+      deferredInstallPrompt = null;
     });
+
+    // iOS: mostrar botão como ajuda (não instala automaticamente)
+    if (isIos() && !isStandalone()) {
+      btnInstall.classList.remove("hidden");
+      btnInstall.textContent = "📲 Como instalar (iPhone)";
+    }
   }
 </script>
 
