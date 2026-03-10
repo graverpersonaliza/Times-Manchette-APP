@@ -1,5 +1,5 @@
 /* PWA Service Worker (cache-first, simple) */
-const CACHE_NAME = "volei-no-sidney-v1";
+const CACHE_NAME = "volei-no-sidney-v2";
 const ASSETS = [
   "./",
   "./index.html",
