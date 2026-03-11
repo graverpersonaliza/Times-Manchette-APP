@@ -106,6 +106,10 @@
 
     // Limite de jogadores por time (6x6)
     const TEAM_MAX = 6;
+    const SUPPORT_WHATSAPP = "5554999778707";
+
+    const PLAN_ORDER = { free: 0, basico: 1, pro: 2 };
+    const PLAN_LABELS = { free: "Free", basico: "Básico", pro: "PRO" };
 
     // ===============================
     // Estado
@@ -135,7 +139,8 @@
       roomSubtitle: "",
       team1Name: "Time 1",
       team2Name: "Time 2",
-      themeColor: "#2563eb"
+      themeColor: "#2563eb",
+      plan: "free"
     };
 
     let db = null;
@@ -270,6 +275,80 @@ function safeBoldInfo(s){
     function getSavedGroups(){
       return loadGroups().sort((a,b)=>(Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0)));
     }
+    function normalizePlan(value){
+      const v = String(value || "free").trim().toLowerCase();
+      return ["free","basico","pro"].includes(v) ? v : "free";
+    }
+
+    function currentPlan(){
+      return normalizePlan(state.plan || "free");
+    }
+
+    function planLabel(plan = currentPlan()){
+      return PLAN_LABELS[normalizePlan(plan)] || "Free";
+    }
+
+    function isPlanAtLeast(plan){
+      return PLAN_ORDER[currentPlan()] >= PLAN_ORDER[normalizePlan(plan)];
+    }
+
+    function maxGroupsForPlan(plan = currentPlan()){
+      const p = normalizePlan(plan);
+      if(p === "pro") return 999;
+      if(p === "basico") return 3;
+      return 1;
+    }
+
+    function getSavedGroupsForCurrentPlan(){
+      const groups = getSavedGroups();
+      const limit = maxGroupsForPlan();
+      return limit >= 999 ? groups : groups.slice(0, limit);
+    }
+
+    function upgradeWhatsLink(feature){
+      const msg = encodeURIComponent(`Olá! Quero liberar ${feature || "os recursos premium"} no Manchette Volleyball.`);
+      return `https://wa.me/${SUPPORT_WHATSAPP}?text=${msg}`;
+    }
+
+    function featureAllowed(feature){
+      const plan = currentPlan();
+      if(feature === "multiGroups") return maxGroupsForPlan(plan) > 1;
+      if(feature === "history") return plan === "basico" || plan === "pro";
+      if(feature === "ranking") return plan === "basico" || plan === "pro";
+      if(feature === "stats") return plan === "basico" || plan === "pro";
+      if(feature === "reports") return plan === "pro";
+      if(feature === "customization") return plan === "pro";
+      return true;
+    }
+
+    function upgradeMessage(feature){
+      const map = {
+        multiGroups: "Múltiplos grupos",
+        history: "Histórico de partidas",
+        ranking: "Ranking",
+        stats: "Estatísticas",
+        reports: "Relatórios",
+        customization: "Personalização"
+      };
+      return `${map[feature] || "Este recurso"} está disponível em planos superiores.`;
+    }
+
+    function premiumLockCard(title, text, feature){
+      return `
+        <div class="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <div class="text-sm font-bold text-amber-900">🔒 ${escapeHtml(title)}</div>
+              <div class="mt-1 text-sm text-amber-800">${escapeHtml(text)}</div>
+            </div>
+            <a href="${upgradeWhatsLink(feature)}" target="_blank" rel="noopener noreferrer" class="px-3 py-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-semibold text-sm text-center">
+              Fazer upgrade
+            </a>
+          </div>
+        </div>
+      `;
+    }
+
 
     function upsertSavedGroup(profile){
       const code = normalizeRoomCode(profile && profile.code);
@@ -295,7 +374,17 @@ function safeBoldInfo(s){
 
     function rememberCurrentGroup(silent=false){
       const code = normalizeRoomCode(state.code);
-      if(!code) return;
+      if(!code) return false;
+      const groups = loadGroups();
+      const alreadyExists = groups.some(g => normalizeRoomCode(g.code) === code);
+      const maxGroups = maxGroupsForPlan();
+
+      if(!alreadyExists && groups.length >= maxGroups){
+        if(!silent) setInfo(`Seu plano ${planLabel()} permite salvar até ${maxGroups} grupo(s). Faça upgrade para liberar mais grupos.`);
+        else render();
+        return false;
+      }
+
       upsertSavedGroup({
         code,
         roomName: state.roomName || "",
@@ -307,6 +396,7 @@ function safeBoldInfo(s){
       });
       if(!silent) setInfo("Grupo salvo para acesso rápido.");
       else render();
+      return true;
     }
 
     function buildRoomUrl(code){
@@ -669,7 +759,7 @@ async function ensureMeLoaded(){
 
     async function ensureRoom(code){
       const c = String(code||"").toUpperCase();
-      await matchDoc(c).set({ code:c, open:true, updatedAt: nowIso() }, { merge:true });
+      await matchDoc(c).set({ code:c, open:true, plan:"free", updatedAt: nowIso() }, { merge:true });
       await ensureActiveRound(c);
     }
 
@@ -736,6 +826,7 @@ async function ensureMeLoaded(){
         state.team1Name = d && d.team1Name ? String(d.team1Name) : "Time 1";
         state.team2Name = d && d.team2Name ? String(d.team2Name) : "Time 2";
         state.themeColor = d && d.themeColor ? String(d.themeColor) : "#2563eb";
+        state.plan = d && d.plan ? normalizePlan(d.plan) : "free";
 
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
         const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
@@ -1694,11 +1785,21 @@ function openWhatsApp(text, numberDigits){
 
       const playersArr = Object.values(state.players||{});
       const byTarget = byTargetScores(state.ratings||{});
-      const savedGroups = getSavedGroups();
+      const plan = currentPlan();
+      const planName = planLabel(plan);
+      const groupsLimit = maxGroupsForPlan(plan);
+      const savedGroups = getSavedGroupsForCurrentPlan();
+      const allSavedGroupsCount = getSavedGroups().length;
       const roomDisplayName = (state.roomName || "").trim() || "Manchette Volleyball";
       const roomSubtitle = (state.roomSubtitle || "").trim();
       const team1Label = (state.team1Name || "").trim() || "Time 1";
       const team2Label = (state.team2Name || "").trim() || "Time 2";
+      const canUseHistory = featureAllowed("history");
+      const canUseRanking = featureAllowed("ranking");
+      const canUseStats = featureAllowed("stats");
+      const canUseReports = featureAllowed("reports");
+      const canUseCustomization = featureAllowed("customization");
+      const rankingLimit = plan === "basico" ? 5 : 999;
 
       try{ document.title = state.code ? `${roomDisplayName} | ${String(state.code).toUpperCase()}` : "Manchette Volleyball"; }catch{}
 
@@ -1727,6 +1828,7 @@ function openWhatsApp(text, numberDigits){
       const rankingData = buildRankingData(playersArr, byTarget);
       const dashboardStats = computeDashboardStats(playersArr, presentPlayers, waiting, team1, team2, byTarget);
       const historyData = snapshotsArray();
+      const historyVisible = canUseHistory ? historyData.slice(0, plan === "basico" ? 5 : 10) : [];
 
       const openBadge = state.open
         ? `<span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">INSCRIÇÃO ABERTA</span>`
@@ -1746,7 +1848,7 @@ function openWhatsApp(text, numberDigits){
                   <div>⌛ Faltam <b>${escapeHtml(countdownLabel)}</b></div>
                 </div>
               ` : ``}
-              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}</div>
+              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planName)}</span></div>
             </div>
 
             <div class="flex flex-wrap gap-2 items-center">
@@ -1792,7 +1894,7 @@ function openWhatsApp(text, numberDigits){
                   <h3 class="font-bold text-gray-800">Múltiplos grupos</h3>
                   <p class="text-xs text-gray-500">Salve seus grupos para entrar com um toque.</p>
                 </div>
-                <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${savedGroups.length} salvo(s)</span>
+                <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit} grupo(s)</span>
               </div>
 
               ${savedGroups.length ? `
@@ -1813,6 +1915,7 @@ function openWhatsApp(text, numberDigits){
               ` : `
                 <div class="mt-3 text-sm text-gray-500">Nenhum grupo salvo ainda. Entre em uma sala e clique em <b>Salvar este grupo</b>.</div>
               `}
+              ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Múltiplos grupos", "No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.", "múltiplos grupos")}</div>` : ``}
             </div>
           ` : `
             <div class="mt-4 grid gap-4 lg:grid-cols-3">
@@ -2030,7 +2133,7 @@ function openWhatsApp(text, numberDigits){
                         </div>
                         <div class="mt-2 text-xs text-gray-500">Mostrando os 3 mais recentes.</div>
                       ` : `
-                        <div class="mt-2 text-sm text-gray-500">Ainda não há times salvos.</div>
+                        ${canUseHistory ? `<div class="mt-2 text-sm text-gray-500">Ainda não há times salvos.</div>` : `<div class="mt-2">${premiumLockCard("Histórico de partidas", "No plano Free o histórico fica bloqueado. Libere no Básico ou PRO.", "histórico de partidas")}</div>`}
                       `}
                     </div>
                   ` : `
@@ -2041,7 +2144,7 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
                 <div class="border-t pt-3">
-                  <h3 class="font-semibold mb-2">Múltiplos grupos</h3>
+                  <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Múltiplos grupos</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
                   <div class="rounded-xl border p-3 bg-gray-50">
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-sm text-gray-700">
@@ -2066,6 +2169,7 @@ function openWhatsApp(text, numberDigits){
                         `).join("")}
                       </div>
                     ` : `<div class="mt-2 text-xs text-gray-500">Salve este grupo para alternar rapidamente entre várias salas.</div>`}
+                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos", "O plano Free salva 1 grupo. Faça upgrade para liberar 3 grupos no Básico ou grupos ilimitados no PRO.", "múltiplos grupos")}</div>` : ``}
                   </div>
                 </div>
 
@@ -2082,6 +2186,18 @@ function openWhatsApp(text, numberDigits){
                     </div>
                     <div class="text-xs text-gray-500 mt-2">
                       <b>Nova rodada</b>: todo mundo volta a <b>Ausente</b> e confirma presença novamente. <b>Resetar</b> zera tudo.
+                    </div>
+                    <div class="mt-3 rounded-xl border p-3 bg-gray-50">
+                      <div class="text-sm font-semibold">Plano da sala</div>
+                      <div class="mt-2 flex flex-col sm:flex-row gap-2">
+                        <select id="roomPlanSelect" class="px-3 py-2 rounded-lg border flex-1">
+                          <option value="free" ${plan === "free" ? "selected" : ""}>Free</option>
+                          <option value="basico" ${plan === "basico" ? "selected" : ""}>Básico</option>
+                          <option value="pro" ${plan === "pro" ? "selected" : ""}>PRO</option>
+                        </select>
+                        <button id="btnSavePlan" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">Salvar plano</button>
+                      </div>
+                      <div class="mt-2 text-xs text-gray-500">Use isso para ativar o plano do cliente sem precisar de outro app.</div>
                     </div>
                     <div class="mt-3 rounded-xl border p-3 bg-gray-50">
                       <div class="text-sm font-semibold">Horário da partida</div>
@@ -2109,23 +2225,30 @@ function openWhatsApp(text, numberDigits){
 
                     <div class="mt-3 rounded-xl border p-3 bg-gray-50">
                       <div class="text-sm font-semibold">Personalização</div>
-                      <div class="mt-2 grid gap-2">
-                        <input id="roomNameInput" type="text" maxlength="40" value="${escapeHtml(state.roomName || "Manchette Volleyball")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do grupo/app" />
-                        <input id="roomSubtitleInput" type="text" maxlength="60" value="${escapeHtml(state.roomSubtitle || "")}" class="px-3 py-2 rounded-lg border" placeholder="Subtítulo do grupo" />
-                        <div class="grid grid-cols-2 gap-2">
-                          <input id="team1NameInput" type="text" maxlength="20" value="${escapeHtml(state.team1Name || "Time 1")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do Time 1" />
-                          <input id="team2NameInput" type="text" maxlength="20" value="${escapeHtml(state.team2Name || "Time 2")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do Time 2" />
+                      ${canUseCustomization ? `
+                        <div class="mt-2 grid gap-2">
+                          <input id="roomNameInput" type="text" maxlength="40" value="${escapeHtml(state.roomName || "Manchette Volleyball")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do grupo/app" />
+                          <input id="roomSubtitleInput" type="text" maxlength="60" value="${escapeHtml(state.roomSubtitle || "")}" class="px-3 py-2 rounded-lg border" placeholder="Subtítulo do grupo" />
+                          <div class="grid grid-cols-2 gap-2">
+                            <input id="team1NameInput" type="text" maxlength="20" value="${escapeHtml(state.team1Name || "Time 1")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do Time 1" />
+                            <input id="team2NameInput" type="text" maxlength="20" value="${escapeHtml(state.team2Name || "Time 2")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do Time 2" />
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <label class="text-xs font-semibold text-gray-600">Cor principal</label>
+                            <input id="themeColorInput" type="color" value="${escapeHtml(state.themeColor || "#2563eb")}" class="h-10 w-20 rounded-lg border bg-white p-1" />
+                          </div>
                         </div>
-                        <div class="flex items-center gap-2">
-                          <label class="text-xs font-semibold text-gray-600">Cor principal</label>
-                          <input id="themeColorInput" type="color" value="${escapeHtml(state.themeColor || "#2563eb")}" class="h-10 w-20 rounded-lg border bg-white p-1" />
+                        <div class="mt-2 flex flex-wrap gap-2">
+                          <button id="btnSavePersonalization" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">Salvar personalização</button>
+                          <button id="btnCopyRoomLink" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Copiar link da sala</button>
                         </div>
-                      </div>
-                      <div class="mt-2 flex flex-wrap gap-2">
-                        <button id="btnSavePersonalization" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">Salvar personalização</button>
-                        <button id="btnCopyRoomLink" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Copiar link da sala</button>
-                      </div>
-                      <div class="mt-2 text-xs text-gray-500">Use isso para nomear grupos, deixar a interface mais profissional e compartilhar um link direto da sala.</div>
+                        <div class="mt-2 text-xs text-gray-500">Use isso para nomear grupos, deixar a interface mais profissional e compartilhar um link direto da sala.</div>
+                      ` : `
+                        <div class="mt-3">${premiumLockCard("Personalização avançada", "Libere nome do grupo, subtítulo, nomes dos times, cor principal e link profissional no plano PRO.", "personalização")}</div>
+                        <div class="mt-2">
+                          <button id="btnCopyRoomLink" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Copiar link da sala</button>
+                        </div>
+                      `}
                     </div>
                   ` : `
                     <div class="flex gap-2">
@@ -2178,81 +2301,101 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
                 <div class="bg-white rounded-2xl border p-4 md:col-span-2">
-                  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  ${plan === "free" ? `
                     <div>
-                      <h2 class="text-lg font-semibold">Painel avançado</h2>
-                      <p class="text-sm text-gray-500">Ranking, estatísticas, relatórios e histórico para gestão mais profissional.</p>
+                      <h2 class="text-lg font-semibold">Painel de gestão</h2>
+                      <p class="text-sm text-gray-500">No plano Free você usa a base do app para cadastro, presença, avaliações e montagem de times.</p>
                     </div>
-                    <div class="flex flex-wrap gap-2">
-                      <button id="btnCopyReport" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">Copiar relatório</button>
-                      <button id="btnWAReport" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold text-sm">WhatsApp</button>
-                      <button id="btnDownloadReport" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm">Baixar TXT</button>
+                    <div class="mt-4 grid gap-3">
+                      ${premiumLockCard("Histórico de partidas", "Salve e consulte partidas anteriores no plano Básico ou PRO.", "histórico de partidas")}
+                      ${premiumLockCard("Ranking e estatísticas", "Compare atletas e acompanhe números do grupo nos planos superiores.", "ranking e estatísticas")}
+                      ${premiumLockCard("Relatórios e personalização", "Relatórios completos e personalização profissional ficam liberados no plano PRO.", "relatórios e personalização")}
                     </div>
-                  </div>
+                  ` : `
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                      <div>
+                        <h2 class="text-lg font-semibold">${plan === "pro" ? "Painel avançado" : "Painel de gestão"}</h2>
+                        <p class="text-sm text-gray-500">${plan === "pro" ? "Ranking, estatísticas, relatórios e histórico para gestão mais profissional." : "Ranking, estatísticas e histórico essenciais para o organizador."}</p>
+                      </div>
+                      ${canUseReports ? `
+                        <div class="flex flex-wrap gap-2">
+                          <button id="btnCopyReport" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">Copiar relatório</button>
+                          <button id="btnWAReport" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold text-sm">WhatsApp</button>
+                          <button id="btnDownloadReport" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm">Baixar TXT</button>
+                        </div>
+                      ` : `
+                        <div class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          Relatórios completos ficam disponíveis no plano PRO.
+                        </div>
+                      `}
+                    </div>
 
-                  <div class="mt-4 grid gap-4 xl:grid-cols-3">
-                    <div class="rounded-2xl border p-3 bg-gray-50">
-                      <div class="font-semibold text-gray-800">Ranking atual</div>
-                      <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
-                        ${rankingData.length ? rankingData.map((r, idx) => `
-                          <div class="rounded-xl border bg-white px-3 py-2 flex items-center justify-between gap-3">
-                            <div>
-                              <div class="text-sm font-semibold text-gray-800">${idx+1}. ${escapeHtml(r.name)}</div>
-                              <div class="text-[11px] text-gray-500">${escapeHtml(r.position)} · históricos ${r.appearances} ${r.present ? "· presente" : ""}</div>
+                    <div class="mt-4 grid gap-4 xl:grid-cols-3">
+                      <div class="rounded-2xl border p-3 bg-gray-50">
+                        <div class="font-semibold text-gray-800">Ranking atual</div>
+                        <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
+                          ${rankingData.length ? rankingData.slice(0, rankingLimit).map((r, idx) => `
+                            <div class="rounded-xl border bg-white px-3 py-2 flex items-center justify-between gap-3">
+                              <div>
+                                <div class="text-sm font-semibold text-gray-800">${idx+1}. ${escapeHtml(r.name)}</div>
+                                <div class="text-[11px] text-gray-500">${escapeHtml(r.position)} · históricos ${r.appearances} ${r.present ? "· presente" : ""}</div>
+                              </div>
+                              <div class="text-sm font-bold text-blue-700">${r.note.toFixed(1)}</div>
                             </div>
-                            <div class="text-sm font-bold text-blue-700">${r.note.toFixed(1)}</div>
+                          `).join("") : `<div class="text-sm text-gray-500">Sem ranking ainda.</div>`}
+                        </div>
+                        ${plan === "basico" ? `<div class="mt-2 text-xs text-amber-700">Plano Básico mostra os 5 primeiros. Ranking completo no PRO.</div>` : ``}
+                      </div>
+
+                      <div class="rounded-2xl border p-3 bg-gray-50">
+                        <div class="font-semibold text-gray-800">Estatísticas</div>
+                        <div class="mt-3 grid grid-cols-2 gap-2">
+                          <div class="rounded-xl bg-white border p-3">
+                            <div class="text-[11px] text-gray-500">Jogadores</div>
+                            <div class="text-xl font-extrabold text-gray-800">${dashboardStats.totalPlayers}</div>
                           </div>
-                        `).join("") : `<div class="text-sm text-gray-500">Sem ranking ainda.</div>`}
-                      </div>
-                    </div>
-
-                    <div class="rounded-2xl border p-3 bg-gray-50">
-                      <div class="font-semibold text-gray-800">Estatísticas</div>
-                      <div class="mt-3 grid grid-cols-2 gap-2">
-                        <div class="rounded-xl bg-white border p-3">
-                          <div class="text-[11px] text-gray-500">Jogadores</div>
-                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.totalPlayers}</div>
-                        </div>
-                        <div class="rounded-xl bg-white border p-3">
-                          <div class="text-[11px] text-gray-500">Presentes</div>
-                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.presentPlayers}</div>
-                        </div>
-                        <div class="rounded-xl bg-white border p-3">
-                          <div class="text-[11px] text-gray-500">Média geral</div>
-                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.avgGeneral}</div>
-                        </div>
-                        <div class="rounded-xl bg-white border p-3">
-                          <div class="text-[11px] text-gray-500">Avaliações</div>
-                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.ratingsCount}</div>
-                        </div>
-                        <div class="rounded-xl bg-white border p-3 col-span-2">
-                          <div class="text-[11px] text-gray-500">Posição mais comum</div>
-                          <div class="text-base font-extrabold text-gray-800">${escapeHtml(dashboardStats.topPos)}</div>
-                        </div>
-                        <div class="rounded-xl bg-white border p-3 col-span-2">
-                          <div class="text-[11px] text-gray-500">Melhor nota atual</div>
-                          <div class="text-base font-extrabold text-gray-800">${dashboardStats.best ? escapeHtml(dashboardStats.best.name) + " · " + dashboardStats.best.note.toFixed(1) : "—"}</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="rounded-2xl border p-3 bg-gray-50">
-                      <div class="font-semibold text-gray-800">Histórico de partidas</div>
-                      <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
-                        ${historyData.length ? historyData.map((snap, idx) => `
-                          <div class="rounded-xl border bg-white px-3 py-2">
-                            <div class="flex items-center justify-between gap-2">
-                              <div class="text-sm font-semibold text-gray-800">${idx+1}. ${escapeHtml(fmtBR(snap.createdAtMs || snap.createdAt))}</div>
-                              <div class="text-[11px] text-gray-500">${(Array.isArray(snap.team1)?snap.team1.length:0)+(Array.isArray(snap.team2)?snap.team2.length:0)} jogadores</div>
-                            </div>
-                            <div class="mt-1 text-[11px] text-gray-500">
-                              ${escapeHtml(team1Label)} ${Number(snap.avg1 || 0).toFixed(2)} · ${escapeHtml(team2Label)} ${Number(snap.avg2 || 0).toFixed(2)}
-                            </div>
+                          <div class="rounded-xl bg-white border p-3">
+                            <div class="text-[11px] text-gray-500">Presentes</div>
+                            <div class="text-xl font-extrabold text-gray-800">${dashboardStats.presentPlayers}</div>
                           </div>
-                        `).join("") : `<div class="text-sm text-gray-500">Nenhuma partida salva ainda.</div>`}
+                          <div class="rounded-xl bg-white border p-3">
+                            <div class="text-[11px] text-gray-500">Média geral</div>
+                            <div class="text-xl font-extrabold text-gray-800">${dashboardStats.avgGeneral}</div>
+                          </div>
+                          <div class="rounded-xl bg-white border p-3">
+                            <div class="text-[11px] text-gray-500">Avaliações</div>
+                            <div class="text-xl font-extrabold text-gray-800">${dashboardStats.ratingsCount}</div>
+                          </div>
+                          <div class="rounded-xl bg-white border p-3 col-span-2">
+                            <div class="text-[11px] text-gray-500">Posição mais comum</div>
+                            <div class="text-base font-extrabold text-gray-800">${escapeHtml(dashboardStats.topPos)}</div>
+                          </div>
+                          <div class="rounded-xl bg-white border p-3 col-span-2">
+                            <div class="text-[11px] text-gray-500">Melhor nota atual</div>
+                            <div class="text-base font-extrabold text-gray-800">${dashboardStats.best ? escapeHtml(dashboardStats.best.name) + " · " + dashboardStats.best.note.toFixed(1) : "—"}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="rounded-2xl border p-3 bg-gray-50">
+                        <div class="font-semibold text-gray-800">Histórico de partidas</div>
+                        <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
+                          ${historyVisible.length ? historyVisible.map((snap, idx) => `
+                            <div class="rounded-xl border bg-white px-3 py-2">
+                              <div class="flex items-center justify-between gap-2">
+                                <div class="text-sm font-semibold text-gray-800">${idx+1}. ${escapeHtml(fmtBR(snap.createdAtMs || snap.createdAt))}</div>
+                                <div class="text-[11px] text-gray-500">${(Array.isArray(snap.team1)?snap.team1.length:0)+(Array.isArray(snap.team2)?snap.team2.length:0)} jogadores</div>
+                              </div>
+                              <div class="mt-1 text-[11px] text-gray-500">
+                                ${escapeHtml(team1Label)} ${Number(snap.avg1 || 0).toFixed(2)} · ${escapeHtml(team2Label)} ${Number(snap.avg2 || 0).toFixed(2)}
+                              </div>
+                            </div>
+                          `).join("") : `<div class="text-sm text-gray-500">Nenhuma partida salva ainda.</div>`}
+                        </div>
+                        ${plan === "basico" ? `<div class="mt-2 text-xs text-amber-700">Histórico básico liberado. Recursos completos no PRO.</div>` : ``}
                       </div>
                     </div>
-                  </div>
+                  `}
                 </div>
               </div>
             </div>
@@ -2336,6 +2479,7 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnWAReport")) $("btnWAReport").onclick = ()=> whatsManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnDownloadReport")) $("btnDownloadReport").onclick = ()=> downloadManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnSavePersonalization")) $("btnSavePersonalization").onclick = ()=> savePersonalization();
+        if($("btnSavePlan")) $("btnSavePlan").onclick = ()=> saveRoomPlan();
         if($("btnCopyRoomLink")) $("btnCopyRoomLink").onclick = ()=> copyToClipboard(buildRoomUrl(code));
 
         document.querySelectorAll("[data-open-group]").forEach(btn=>{
