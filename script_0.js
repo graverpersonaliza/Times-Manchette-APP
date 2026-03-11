@@ -2273,10 +2273,10 @@ function openWhatsApp(text, numberDigits){
 
                 
 
+                ${session.admin ? `
                 <div class="border-t pt-3">
                   <h3 class="font-semibold mb-2">Compartilhar</h3>
 
-                  ${session.admin ? `
                     <div class="flex flex-wrap gap-2">
                       <button id="btnCopyTeams" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Copiar tabela</button>
                       <button id="btnWATeams" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>WhatsApp</button>
@@ -2322,12 +2322,8 @@ function openWhatsApp(text, numberDigits){
                         ${canUseHistory ? `<div class="mt-2 text-sm text-gray-500">Ainda não há times salvos.</div>` : `<div class="mt-2">${premiumLockCard("Histórico de partidas", "No plano Free o histórico fica bloqueado. Libere no Básico ou PRO.", "histórico de partidas")}</div>`}
                       `}
                     </div>
-                  ` : `
-                    <div class="p-3 rounded-xl border bg-gray-50 text-sm text-gray-600">
-                      🔒 Somente o <b>admin</b> pode compartilhar (WhatsApp / Copiar) e Baixar Lista.
-                    </div>
-                  `}
-                </div>
+                  </div>
+                ` : ``}
 
                 <div class="border-t pt-3">
                   <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Múltiplos grupos</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
@@ -2732,6 +2728,10 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
       const last = String(session.code || load(LS_LAST_CODE, "") || "").toUpperCase();
       if(!$("roomCode").value) $("roomCode").value = last;
     }
+    if($("btnAccessPlayer")) $("btnAccessPlayer").onclick = ()=> playerLogin();
+    if($("btnAccessAdmin")) $("btnAccessAdmin").onclick = ()=> adminLogin();
+    if($("btnAccessDeveloper")) $("btnAccessDeveloper").onclick = ()=> developerLogin();
+    if($("btnAccessLogout")) $("btnAccessLogout").onclick = ()=> adminLogout();
     $("btnJoin").onclick = ()=> joinRoom();
     $("btnCreate").onclick = ()=> createRoom();
 
