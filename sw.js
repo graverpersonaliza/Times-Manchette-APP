@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-volleyball-v2";
+const CACHE_NAME = "manchette-volleyball-v3";
 const ASSETS = [
   "./",
   "./index.html",
