@@ -1,18 +1,17 @@
-/* PWA Service Worker (cache-first, simple) */
-const CACHE_NAME = "volei-no-sidney-v2";
+/* PWA Service Worker (GitHub Pages) */
+const CACHE_NAME = "volei-no-sidney-v3";
+const BASE = "/Times-Manchette-APP/";
 const ASSETS = [
-  "./",
-  "./index.html",
-  "./manifest.json",
-  "./icon-192.png",
-  "./icon-512.png"
+  BASE,
+  BASE + "index.html",
+  BASE + "manifest.json",
+  BASE + "icon-192.png",
+  BASE + "icon-512.png"
 ];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(ASSETS))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
   );
 });
 
@@ -34,18 +33,25 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;
+
       return fetch(req)
         .then((res) => {
           try {
             const url = new URL(req.url);
-            if (url.origin === self.location.origin && res && res.status === 200 && res.type === "basic") {
+            // Cache apenas respostas same-origin bem-sucedidas
+            if (
+              url.origin === self.location.origin &&
+              res &&
+              res.status === 200 &&
+              res.type === "basic"
+            ) {
               const copy = res.clone();
               caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
             }
           } catch (e) {}
           return res;
         })
-        .catch(() => caches.match("./"));
+        .catch(() => caches.match(BASE));
     })
   );
 });
