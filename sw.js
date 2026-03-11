@@ -1,9 +1,11 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-volleyball-v1";
+const CACHE_NAME = "manchette-volleyball-v2";
 const ASSETS = [
   "./",
   "./index.html",
   "./manifest.json",
+  "./script_0.js",
+  "./script_1.js",
   "./icon-192.png",
   "./icon-512.png"
 ];
