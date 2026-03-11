@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>Vôlei no Sidney</title>
+  <title>Manchette Volleyball</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -14,13 +14,13 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
 <!-- PWA -->
-<link rel="manifest" href="/Times-Manchette-APP/manifest.json">
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#111827">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Vôlei no Sidney">
-<link rel="apple-touch-icon" href="/Times-Manchette-APP/icon-192.png">
+<meta name="apple-mobile-web-app-title" content="Manchette Volleyball">
+<link rel="apple-touch-icon" href="icon-192.png">
 <!-- /PWA -->
 
 </head>
@@ -90,6 +90,7 @@
     // ===============================
     const LS_SESSION = "vb_session_v3";
     const LS_LAST_CODE = "vb_last_code_v3";
+    const LS_GROUPS = "vb_groups_v1";
 
     const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
 
@@ -128,7 +129,13 @@
       matchDate: "",
       matchTime: "",
       matchLocation: "",
-      closeBeforeMin: 15
+      closeBeforeMin: 15,
+
+      roomName: "",
+      roomSubtitle: "",
+      team1Name: "Time 1",
+      team2Name: "Time 2",
+      themeColor: "#2563eb"
     };
 
     let db = null;
@@ -246,6 +253,91 @@ function safeBoldInfo(s){
       save(LS_SESSION, session);
       if(state.code) save(LS_LAST_CODE, state.code);
     }
+
+    function normalizeRoomCode(value){
+      return String(value || "").trim().toUpperCase();
+    }
+
+    function loadGroups(){
+      const raw = load(LS_GROUPS, []);
+      return Array.isArray(raw) ? raw : [];
+    }
+
+    function saveGroups(groups){
+      save(LS_GROUPS, Array.isArray(groups) ? groups : []);
+    }
+
+    function getSavedGroups(){
+      return loadGroups().sort((a,b)=>(Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0)));
+    }
+
+    function upsertSavedGroup(profile){
+      const code = normalizeRoomCode(profile && profile.code);
+      if(!code) return;
+      const groups = loadGroups().filter(g => normalizeRoomCode(g.code) !== code);
+      groups.push({
+        code,
+        roomName: String((profile && profile.roomName) || "").trim(),
+        roomSubtitle: String((profile && profile.roomSubtitle) || "").trim(),
+        team1Name: String((profile && profile.team1Name) || "Time 1").trim() || "Time 1",
+        team2Name: String((profile && profile.team2Name) || "Time 2").trim() || "Time 2",
+        themeColor: String((profile && profile.themeColor) || "#2563eb").trim() || "#2563eb",
+        updatedAtMs: Number((profile && profile.updatedAtMs) || nowMs())
+      });
+      saveGroups(groups);
+    }
+
+    function removeSavedGroup(code){
+      const c = normalizeRoomCode(code);
+      saveGroups(loadGroups().filter(g => normalizeRoomCode(g.code) !== c));
+      render();
+    }
+
+    function rememberCurrentGroup(silent=false){
+      const code = normalizeRoomCode(state.code);
+      if(!code) return;
+      upsertSavedGroup({
+        code,
+        roomName: state.roomName || "",
+        roomSubtitle: state.roomSubtitle || "",
+        team1Name: state.team1Name || "Time 1",
+        team2Name: state.team2Name || "Time 2",
+        themeColor: state.themeColor || "#2563eb",
+        updatedAtMs: nowMs()
+      });
+      if(!silent) setInfo("Grupo salvo para acesso rápido.");
+      else render();
+    }
+
+    function buildRoomUrl(code){
+      try{
+        const url = new URL(location.href);
+        url.search = "";
+        if(code) url.searchParams.set("sala", normalizeRoomCode(code));
+        return url.toString();
+      }catch{
+        return "";
+      }
+    }
+
+    function syncRoomUrl(code){
+      try{
+        const url = new URL(location.href);
+        if(code) url.searchParams.set("sala", normalizeRoomCode(code));
+        else url.searchParams.delete("sala");
+        history.replaceState({}, "", url.toString());
+      }catch{}
+    }
+
+    function roomCodeFromUrl(){
+      try{
+        const url = new URL(location.href);
+        return normalizeRoomCode(url.searchParams.get("sala") || url.searchParams.get("code"));
+      }catch{
+        return "";
+      }
+    }
+
     function setInfo(msg){ state.info = msg ? String(msg) : ""; render(); }
     function setSyncError(msg){ state.syncError = msg ? String(msg) : ""; render(); }
     function fmtBR(msOrIso){
@@ -378,6 +470,151 @@ async function ensureMeLoaded(){
     }
 
     // ===============================
+    // Indicadores, ranking e relatórios
+    // ===============================
+    function snapshotsArray(){
+      return Object.values(state.snapshots || {}).sort((a,b)=>(Number(b.createdAtMs||0)-Number(a.createdAtMs||0)));
+    }
+
+    function playerSnapshotAppearances(playerId){
+      return snapshotsArray().reduce((acc, snap)=>{
+        const t1 = Array.isArray(snap.team1) ? snap.team1 : [];
+        const t2 = Array.isArray(snap.team2) ? snap.team2 : [];
+        const found = t1.some(p=>p.id===playerId) || t2.some(p=>p.id===playerId);
+        return acc + (found ? 1 : 0);
+      }, 0);
+    }
+
+    function topPosition(players){
+      const count = {};
+      (players || []).forEach(p=>{
+        const pos = String((p && p.position) || "Coringa");
+        count[pos] = (count[pos] || 0) + 1;
+      });
+      return Object.entries(count).sort((a,b)=>b[1]-a[1])[0]?.[0] || "—";
+    }
+
+    function buildRankingData(players, byTarget){
+      return (players || []).map(p => ({
+        id: p.id,
+        name: p.name,
+        position: p.position || "Coringa",
+        note: Number(computedNote(p, byTarget) || 0),
+        present: isPresent(p.id),
+        appearances: playerSnapshotAppearances(p.id)
+      })).sort((a,b)=>(b.note - a.note) || (b.appearances - a.appearances) || String(a.name).localeCompare(String(b.name), "pt-BR"));
+    }
+
+    function computeDashboardStats(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget){
+      const ranking = buildRankingData(players, byTarget);
+      const notes = ranking.map(r=>r.note);
+      const totalRatings = Object.keys(state.ratings || {}).length;
+      const historyCount = snapshotsArray().length;
+      const avgGeneral = notes.length ? avg(notes).toFixed(2) : "0.00";
+      const best = ranking[0] || null;
+      const diff = Math.abs(Number(teamAvg(team1Players, byTarget) || 0) - Number(teamAvg(team2Players, byTarget) || 0));
+      return {
+        totalPlayers: players.length,
+        presentPlayers: presentPlayers.length,
+        waitingPlayers: waitingPlayers.length,
+        assignedPlayers: team1Players.length + team2Players.length,
+        ratingsCount: totalRatings,
+        historyCount,
+        avgGeneral,
+        best,
+        topPos: topPosition(players),
+        balanceDiff: diff.toFixed(2)
+      };
+    }
+
+    function buildManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget){
+      const stats = computeDashboardStats(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget);
+      const ranking = buildRankingData(players, byTarget).slice(0, 8);
+      const history = snapshotsArray().slice(0, 5);
+
+      const lines = [
+        `RELATÓRIO · ${state.roomName || "Manchette Volleyball"}`,
+        state.code ? `Sala: ${String(state.code).toUpperCase()}` : "",
+        state.roomSubtitle ? `Grupo: ${state.roomSubtitle}` : "",
+        `Gerado em: ${fmtBR(Date.now())}`,
+        "",
+        "RESUMO",
+        `Jogadores cadastrados: ${stats.totalPlayers}`,
+        `Presentes agora: ${stats.presentPlayers}`,
+        `Aguardando escolha: ${stats.waitingPlayers}`,
+        `Distribuídos nos times: ${stats.assignedPlayers}`,
+        `Avaliações ocultas registradas: ${stats.ratingsCount}`,
+        `Históricos salvos: ${stats.historyCount}`,
+        `Média geral atual: ${stats.avgGeneral}`,
+        `Posição mais comum: ${stats.topPos}`,
+        `Diferença atual entre os times: ${stats.balanceDiff}`,
+        "",
+        "RANKING ATUAL"
+      ];
+
+      ranking.forEach((r, idx)=>{
+        lines.push(`${idx+1}. ${r.name} · ${r.position} · nota ${r.note.toFixed(1)} · históricos ${r.appearances}`);
+      });
+
+      if(history.length){
+        lines.push("", "ÚLTIMAS PARTIDAS SALVAS");
+        history.forEach((snap, idx)=>{
+          const total = (Array.isArray(snap.team1) ? snap.team1.length : 0) + (Array.isArray(snap.team2) ? snap.team2.length : 0);
+          lines.push(`${idx+1}. ${fmtBR(snap.createdAtMs || snap.createdAt)} · ${total} jogadores · médias ${Number(snap.avg1||0).toFixed(2)} x ${Number(snap.avg2||0).toFixed(2)}`);
+        });
+      }
+
+      return lines.filter(Boolean).join("\n");
+    }
+
+    async function copyManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget){
+      await copyToClipboard(buildManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget));
+      setInfo("Relatório copiado.");
+    }
+
+    function whatsManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget){
+      openWhatsAppWithText(buildManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget));
+    }
+
+    async function downloadManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget){
+      const text = buildManagementReport(players, presentPlayers, waitingPlayers, team1Players, team2Players, byTarget);
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `relatorio-${normalizeRoomCode(state.code || "manchette")}-${new Date().toISOString().slice(0,10)}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 1500);
+      setInfo("Relatório baixado.");
+    }
+
+    async function savePersonalization(){
+      if(!session.admin) return alert("Somente admin.");
+      const code = normalizeRoomCode(state.code);
+      if(!code) return alert("Entre em uma sala primeiro.");
+      try{
+        const roomName = String(document.getElementById("roomNameInput")?.value || "").trim() || "Manchette Volleyball";
+        const roomSubtitle = String(document.getElementById("roomSubtitleInput")?.value || "").trim();
+        const team1Name = String(document.getElementById("team1NameInput")?.value || "").trim() || "Time 1";
+        const team2Name = String(document.getElementById("team2NameInput")?.value || "").trim() || "Time 2";
+        const themeColor = String(document.getElementById("themeColorInput")?.value || "").trim() || "#2563eb";
+
+        await metaUpdate(code, { roomName, roomSubtitle, team1Name, team2Name, themeColor });
+        state.roomName = roomName;
+        state.roomSubtitle = roomSubtitle;
+        state.team1Name = team1Name;
+        state.team2Name = team2Name;
+        state.themeColor = themeColor;
+        rememberCurrentGroup(true);
+        setInfo("Personalização salva.");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    // ===============================
     // Nota calculada (interno)
     // ===============================
     function byTargetScores(ratings){
@@ -494,6 +731,11 @@ async function ensureMeLoaded(){
         state.matchTime = d && d.matchTime ? String(d.matchTime) : "";
         state.matchLocation = d && d.matchLocation ? String(d.matchLocation) : "";
         state.closeBeforeMin = d && d.closeBeforeMin != null ? Math.max(0, Number(d.closeBeforeMin)) : 15;
+        state.roomName = d && d.roomName ? String(d.roomName) : "";
+        state.roomSubtitle = d && d.roomSubtitle ? String(d.roomSubtitle) : "";
+        state.team1Name = d && d.team1Name ? String(d.team1Name) : "Time 1";
+        state.team2Name = d && d.team2Name ? String(d.team2Name) : "Time 2";
+        state.themeColor = d && d.themeColor ? String(d.themeColor) : "#2563eb";
 
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
         const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
@@ -507,6 +749,7 @@ async function ensureMeLoaded(){
         }
 
         maybeAutoCloseSchedule();
+        rememberCurrentGroup(true);
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
 
@@ -622,16 +865,18 @@ async function ensureMeLoaded(){
         session.playerId = "";
         session.admin = false;
         persistSession();
-attachRoom(code);
-        setInfo("Sala criada. Compartilhe o código para os outros entrarem.");
+        syncRoomUrl(code);
+        attachRoom(code);
+        rememberCurrentGroup(true);
+        setInfo("Sala criada. Compartilhe o código ou o link da sala para os outros entrarem.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
-    async function joinRoom(){
+    async function joinRoomByCode(rawCode){
       try{
-        const code = ($("roomCode")?.value || "").trim().toUpperCase();
+        const code = normalizeRoomCode(rawCode);
         if(!code) return;
-        const prevCode = String(session.code||"").toUpperCase();
+        const prevCode = normalizeRoomCode(session.code);
         state.code = code;
         session.code = code;
 
@@ -641,10 +886,17 @@ attachRoom(code);
           session.admin = false;
         }
         persistSession();
-await ensureRoom(code);
+        syncRoomUrl(code);
+        await ensureRoom(code);
         attachRoom(code);
-        setInfo("<b>Entrou na sala, Agora inscreva seu nome ou entre com seu codigo do jogador</b>");
+        rememberCurrentGroup(true);
+        setInfo("<b>Entrou na sala.</b> Agora inscreva seu nome ou entre com seu Código do Jogador.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    async function joinRoom(){
+      const code = ($("roomCode")?.value || "").trim().toUpperCase();
+      return joinRoomByCode(code);
     }
 
     function leaveRoom(){
@@ -654,6 +906,7 @@ await ensureRoom(code);
       session.admin = false;
       persistSession();
       state.code = "";
+      syncRoomUrl("");
       state.players = {};
       state.attendance = {};
       state.ratings = {};
@@ -1182,12 +1435,14 @@ async function randomizeTeams(){
 
     function buildInviteMessage(nome, sala, codigoJogador){
   const sched = getMatchScheduleMeta();
+  const linkSala = buildRoomUrl(sala);
   const lines = [
-    `VÔLEI NO SIDNEY`,
-    `SEU ACESSO `,
+    `MANCHETTE VOLLEYBALL`,
+    `SEU ACESSO`,
     `Nome: ${nome}`,
     `Sala: ${sala}`,
-    `Código do Jogador: ${codigoJogador}`
+    `Código do Jogador: ${codigoJogador}`,
+    linkSala ? `Link direto: ${linkSala}` : ``
   ];
 
   if(sched.hasSchedule){
@@ -1439,6 +1694,13 @@ function openWhatsApp(text, numberDigits){
 
       const playersArr = Object.values(state.players||{});
       const byTarget = byTargetScores(state.ratings||{});
+      const savedGroups = getSavedGroups();
+      const roomDisplayName = (state.roomName || "").trim() || "Manchette Volleyball";
+      const roomSubtitle = (state.roomSubtitle || "").trim();
+      const team1Label = (state.team1Name || "").trim() || "Time 1";
+      const team2Label = (state.team2Name || "").trim() || "Time 2";
+
+      try{ document.title = state.code ? `${roomDisplayName} | ${String(state.code).toUpperCase()}` : "Manchette Volleyball"; }catch{}
 
       const meObj = me();
       const myNote = meObj ? computedNote(meObj, byTarget).toFixed(1) : "";
@@ -1462,6 +1724,9 @@ function openWhatsApp(text, numberDigits){
       const t1Avg = teamAvg(team1, byTarget).toFixed(2);
       const t2Avg = teamAvg(team2, byTarget).toFixed(2);
       const bMsg = balanceMessage(team1, team2, byTarget);
+      const rankingData = buildRankingData(playersArr, byTarget);
+      const dashboardStats = computeDashboardStats(playersArr, presentPlayers, waiting, team1, team2, byTarget);
+      const historyData = snapshotsArray();
 
       const openBadge = state.open
         ? `<span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">INSCRIÇÃO ABERTA</span>`
@@ -1471,8 +1736,8 @@ function openWhatsApp(text, numberDigits){
         <div class="bg-white rounded-2xl shadow p-4 sm:p-6">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
-              <h1 class="text-2xl sm:text-3xl font-extrabold text-gray-800">🏐 Manchette VolleyBall</h1>
-              <p class="text-sm text-gray-500">Rodada atual: <b>${escapeHtml(roundLabel || "—")}</b></p>
+              <h1 class="text-2xl sm:text-3xl font-extrabold text-gray-800">🏐 ${escapeHtml(roomDisplayName)}</h1>
+              <p class="text-sm text-gray-500">${roomSubtitle ? escapeHtml(roomSubtitle) + " · " : ""}Rodada atual: <b>${escapeHtml(roundLabel || "—")}</b></p>
               ${scheduleMeta.hasSchedule ? `
                 <div class="mt-1 space-y-1 text-sm text-gray-600">
                   <div>⏰ Próxima partida: <b>${escapeHtml(matchLabel)}</b></div>
@@ -1519,6 +1784,35 @@ function openWhatsApp(text, numberDigits){
             </div>
             <div class="mt-3 text-sm text-gray-600">
               Dica: use sempre o mesmo código da sala para manter as notas de semana a semana.
+            </div>
+
+            <div class="mt-5 rounded-2xl border bg-gray-50 p-4">
+              <div class="flex items-center justify-between gap-2">
+                <div>
+                  <h3 class="font-bold text-gray-800">Múltiplos grupos</h3>
+                  <p class="text-xs text-gray-500">Salve seus grupos para entrar com um toque.</p>
+                </div>
+                <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${savedGroups.length} salvo(s)</span>
+              </div>
+
+              ${savedGroups.length ? `
+                <div class="mt-3 space-y-2">
+                  ${savedGroups.map(g => `
+                    <div class="rounded-xl border bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                      <div>
+                        <div class="font-semibold text-gray-800">${escapeHtml(g.roomName || ("Grupo " + g.code))}</div>
+                        <div class="text-xs text-gray-500">Sala ${escapeHtml(g.code)}${g.roomSubtitle ? " · " + escapeHtml(g.roomSubtitle) : ""}</div>
+                      </div>
+                      <div class="flex flex-wrap gap-2">
+                        <button data-open-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir</button>
+                        <button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>
+                      </div>
+                    </div>
+                  `).join("")}
+                </div>
+              ` : `
+                <div class="mt-3 text-sm text-gray-500">Nenhum grupo salvo ainda. Entre em uma sala e clique em <b>Salvar este grupo</b>.</div>
+              `}
             </div>
           ` : `
             <div class="mt-4 grid gap-4 lg:grid-cols-3">
@@ -1747,6 +2041,35 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
                 <div class="border-t pt-3">
+                  <h3 class="font-semibold mb-2">Múltiplos grupos</h3>
+                  <div class="rounded-xl border p-3 bg-gray-50">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="text-sm text-gray-700">
+                        <div class="font-semibold">${escapeHtml(roomDisplayName)}</div>
+                        <div class="text-xs text-gray-500">Sala ${escapeHtml(code)}</div>
+                      </div>
+                      <button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar este grupo</button>
+                    </div>
+                    ${savedGroups.length ? `
+                      <div class="mt-3 space-y-2">
+                        ${savedGroups.slice(0,4).map(g => `
+                          <div class="rounded-lg border bg-white px-3 py-2 flex items-center justify-between gap-2">
+                            <div class="min-w-0">
+                              <div class="text-sm font-semibold text-gray-800 truncate">${escapeHtml(g.roomName || ("Grupo " + g.code))}</div>
+                              <div class="text-[11px] text-gray-500 truncate">Sala ${escapeHtml(g.code)}</div>
+                            </div>
+                            <div class="flex gap-2">
+                              <button data-open-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Abrir</button>
+                              <button data-delete-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Excluir</button>
+                            </div>
+                          </div>
+                        `).join("")}
+                      </div>
+                    ` : `<div class="mt-2 text-xs text-gray-500">Salve este grupo para alternar rapidamente entre várias salas.</div>`}
+                  </div>
+                </div>
+
+                <div class="border-t pt-3">
                   <h3 class="font-semibold mb-2">Admin</h3>
                   ${session.admin ? `
                     <div class="text-sm text-green-700 font-semibold">✓ Admin ativo</div>
@@ -1783,6 +2106,27 @@ function openWhatsApp(text, numberDigits){
                       </div>
                       <div class="mt-2 text-xs text-gray-500">O sistema mostra a contagem regressiva e fecha a inscrição automaticamente no prazo definido.</div>
                     </div>
+
+                    <div class="mt-3 rounded-xl border p-3 bg-gray-50">
+                      <div class="text-sm font-semibold">Personalização</div>
+                      <div class="mt-2 grid gap-2">
+                        <input id="roomNameInput" type="text" maxlength="40" value="${escapeHtml(state.roomName || "Manchette Volleyball")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do grupo/app" />
+                        <input id="roomSubtitleInput" type="text" maxlength="60" value="${escapeHtml(state.roomSubtitle || "")}" class="px-3 py-2 rounded-lg border" placeholder="Subtítulo do grupo" />
+                        <div class="grid grid-cols-2 gap-2">
+                          <input id="team1NameInput" type="text" maxlength="20" value="${escapeHtml(state.team1Name || "Time 1")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do Time 1" />
+                          <input id="team2NameInput" type="text" maxlength="20" value="${escapeHtml(state.team2Name || "Time 2")}" class="px-3 py-2 rounded-lg border" placeholder="Nome do Time 2" />
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <label class="text-xs font-semibold text-gray-600">Cor principal</label>
+                          <input id="themeColorInput" type="color" value="${escapeHtml(state.themeColor || "#2563eb")}" class="h-10 w-20 rounded-lg border bg-white p-1" />
+                        </div>
+                      </div>
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <button id="btnSavePersonalization" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">Salvar personalização</button>
+                        <button id="btnCopyRoomLink" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Copiar link da sala</button>
+                      </div>
+                      <div class="mt-2 text-xs text-gray-500">Use isso para nomear grupos, deixar a interface mais profissional e compartilhar um link direto da sala.</div>
+                    </div>
                   ` : `
                     <div class="flex gap-2">
                       <input id="adminPass" type="password" placeholder="Senha admin" class="px-3 py-2 rounded-lg border flex-1" />
@@ -1795,7 +2139,7 @@ function openWhatsApp(text, numberDigits){
               <div class="lg:col-span-2 grid gap-4 md:grid-cols-2">
                 <div class="bg-white rounded-2xl border p-3">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-lg font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
+                    <h2 class="text-lg font-bold text-blue-700">${escapeHtml(team1Label)} <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t1Avg}</div>
                   </div>
                   <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
@@ -1805,7 +2149,7 @@ function openWhatsApp(text, numberDigits){
 
                 <div class="bg-white rounded-2xl border p-3">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-lg font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
+                    <h2 class="text-lg font-bold text-orange-700">${escapeHtml(team2Label)} <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t2Avg}</div>
                   </div>
                   <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
@@ -1830,6 +2174,84 @@ function openWhatsApp(text, numberDigits){
                   </div>
                   <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${absent.length ? absent.map(p => absentCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém ausente.</div>`}
+                  </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <h2 class="text-lg font-semibold">Painel avançado</h2>
+                      <p class="text-sm text-gray-500">Ranking, estatísticas, relatórios e histórico para gestão mais profissional.</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnCopyReport" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">Copiar relatório</button>
+                      <button id="btnWAReport" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold text-sm">WhatsApp</button>
+                      <button id="btnDownloadReport" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm">Baixar TXT</button>
+                    </div>
+                  </div>
+
+                  <div class="mt-4 grid gap-4 xl:grid-cols-3">
+                    <div class="rounded-2xl border p-3 bg-gray-50">
+                      <div class="font-semibold text-gray-800">Ranking atual</div>
+                      <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
+                        ${rankingData.length ? rankingData.map((r, idx) => `
+                          <div class="rounded-xl border bg-white px-3 py-2 flex items-center justify-between gap-3">
+                            <div>
+                              <div class="text-sm font-semibold text-gray-800">${idx+1}. ${escapeHtml(r.name)}</div>
+                              <div class="text-[11px] text-gray-500">${escapeHtml(r.position)} · históricos ${r.appearances} ${r.present ? "· presente" : ""}</div>
+                            </div>
+                            <div class="text-sm font-bold text-blue-700">${r.note.toFixed(1)}</div>
+                          </div>
+                        `).join("") : `<div class="text-sm text-gray-500">Sem ranking ainda.</div>`}
+                      </div>
+                    </div>
+
+                    <div class="rounded-2xl border p-3 bg-gray-50">
+                      <div class="font-semibold text-gray-800">Estatísticas</div>
+                      <div class="mt-3 grid grid-cols-2 gap-2">
+                        <div class="rounded-xl bg-white border p-3">
+                          <div class="text-[11px] text-gray-500">Jogadores</div>
+                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.totalPlayers}</div>
+                        </div>
+                        <div class="rounded-xl bg-white border p-3">
+                          <div class="text-[11px] text-gray-500">Presentes</div>
+                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.presentPlayers}</div>
+                        </div>
+                        <div class="rounded-xl bg-white border p-3">
+                          <div class="text-[11px] text-gray-500">Média geral</div>
+                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.avgGeneral}</div>
+                        </div>
+                        <div class="rounded-xl bg-white border p-3">
+                          <div class="text-[11px] text-gray-500">Avaliações</div>
+                          <div class="text-xl font-extrabold text-gray-800">${dashboardStats.ratingsCount}</div>
+                        </div>
+                        <div class="rounded-xl bg-white border p-3 col-span-2">
+                          <div class="text-[11px] text-gray-500">Posição mais comum</div>
+                          <div class="text-base font-extrabold text-gray-800">${escapeHtml(dashboardStats.topPos)}</div>
+                        </div>
+                        <div class="rounded-xl bg-white border p-3 col-span-2">
+                          <div class="text-[11px] text-gray-500">Melhor nota atual</div>
+                          <div class="text-base font-extrabold text-gray-800">${dashboardStats.best ? escapeHtml(dashboardStats.best.name) + " · " + dashboardStats.best.note.toFixed(1) : "—"}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="rounded-2xl border p-3 bg-gray-50">
+                      <div class="font-semibold text-gray-800">Histórico de partidas</div>
+                      <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
+                        ${historyData.length ? historyData.map((snap, idx) => `
+                          <div class="rounded-xl border bg-white px-3 py-2">
+                            <div class="flex items-center justify-between gap-2">
+                              <div class="text-sm font-semibold text-gray-800">${idx+1}. ${escapeHtml(fmtBR(snap.createdAtMs || snap.createdAt))}</div>
+                              <div class="text-[11px] text-gray-500">${(Array.isArray(snap.team1)?snap.team1.length:0)+(Array.isArray(snap.team2)?snap.team2.length:0)} jogadores</div>
+                            </div>
+                            <div class="mt-1 text-[11px] text-gray-500">
+                              ${escapeHtml(team1Label)} ${Number(snap.avg1 || 0).toFixed(2)} · ${escapeHtml(team2Label)} ${Number(snap.avg2 || 0).toFixed(2)}
+                            </div>
+                          </div>
+                        `).join("") : `<div class="text-sm text-gray-500">Nenhuma partida salva ainda.</div>`}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1909,6 +2331,27 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnSort")) $("btnSort").onclick = ()=> randomizeTeams();
         if($("btnReset")) $("btnReset").onclick = ()=> resetCurrentRoom();
 
+        if($("btnSaveGroup")) $("btnSaveGroup").onclick = ()=> rememberCurrentGroup();
+        if($("btnCopyReport")) $("btnCopyReport").onclick = ()=> copyManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
+        if($("btnWAReport")) $("btnWAReport").onclick = ()=> whatsManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
+        if($("btnDownloadReport")) $("btnDownloadReport").onclick = ()=> downloadManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
+        if($("btnSavePersonalization")) $("btnSavePersonalization").onclick = ()=> savePersonalization();
+        if($("btnCopyRoomLink")) $("btnCopyRoomLink").onclick = ()=> copyToClipboard(buildRoomUrl(code));
+
+        document.querySelectorAll("[data-open-group]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-open-group");
+            joinRoomByCode(roomCode);
+          });
+        });
+        document.querySelectorAll("[data-delete-group]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-delete-group");
+            removeSavedGroup(roomCode);
+            setInfo("Grupo removido da lista salva.");
+          });
+        });
+
         if($("btnAdminIn")) $("btnAdminIn").onclick = ()=> adminLogin();
         if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
         if($("btnSaveSchedule")) $("btnSaveSchedule").onclick = ()=> saveMatchSchedule();
@@ -1931,6 +2374,20 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
     }
     $("btnJoin").onclick = ()=> joinRoom();
     $("btnCreate").onclick = ()=> createRoom();
+
+    document.querySelectorAll("[data-open-group]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const roomCode = btn.getAttribute("data-open-group");
+        joinRoomByCode(roomCode);
+      });
+    });
+    document.querySelectorAll("[data-delete-group]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const roomCode = btn.getAttribute("data-delete-group");
+        removeSavedGroup(roomCode);
+        setInfo("Grupo removido da lista salva.");
+      });
+    });
   }
 }
 
@@ -1977,6 +2434,20 @@ window.addEventListener("unhandledrejection", (ev)=>{
       }
 
       render();
+
+      const roomFromQuery = roomCodeFromUrl();
+      const lastRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, "") || "");
+      const startupRoom = roomFromQuery || lastRoom;
+      if(startupRoom){
+        joinRoomByCode(startupRoom);
+      }
+
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("sw.js").catch(()=>{});
+        });
+      }
+
       setInterval(()=>{
         if(state.code){
           maybeAutoCloseSchedule();
