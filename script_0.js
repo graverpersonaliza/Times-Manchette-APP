@@ -15,7 +15,7 @@
     // ===============================
     // Config do app
     // ===============================
-    const LS_SESSION = "vb_session_v3";
+    const LS_SESSION = "vb_session_v4";
     const LS_LAST_CODE = "vb_last_code_v3";
     const LS_GROUPS = "vb_groups_v1";
 
@@ -23,6 +23,7 @@
 
     // Admin (não exibimos a senha em lugar nenhum)
     const ADMIN_PASS = "admin123"; // troque se quiser
+    const DEVELOPER_PASS = "NoeCreate2026!"; // troque antes de publicar
 
     // Escalas
     const MIN_NOTA = 5, MAX_NOTA = 10;
@@ -41,7 +42,7 @@
     // ===============================
     // Estado
     // ===============================
-    let session = load(LS_SESSION, { code:"", playerId:"", prevPlayerId:"", admin:false });
+    let session = normalizeSession(load(LS_SESSION, { code:"", playerId:"", prevPlayerId:"", admin:false, developer:false, role:"player" }));
 
     let state = {
       code: "",
@@ -67,7 +68,9 @@
       team1Name: "Time 1",
       team2Name: "Time 2",
       themeColor: "#2563eb",
-      plan: "free"
+      plan: "free",
+      developerRooms: [],
+      developerRoomsError: ""
     };
 
     let db = null;
@@ -184,6 +187,58 @@ function safeBoldInfo(s){
     function persistSession(){
       save(LS_SESSION, session);
       if(state.code) save(LS_LAST_CODE, state.code);
+    }
+
+    function normalizeSession(raw){
+      const base = Object.assign({ code:"", playerId:"", prevPlayerId:"", admin:false, developer:false, role:"player" }, raw || {});
+      if(base.role === "developer" || base.developer){
+        base.role = "developer";
+        base.developer = true;
+        base.admin = true;
+      }else if(base.role === "admin" || base.admin){
+        base.role = "admin";
+        base.developer = false;
+        base.admin = true;
+      }else{
+        base.role = "player";
+        base.developer = false;
+        base.admin = false;
+      }
+      return base;
+    }
+
+    function accessMode(){
+      if(session.developer) return "developer";
+      if(session.admin) return "admin";
+      return "player";
+    }
+
+    function accessModeLabel(mode = accessMode()){
+      if(mode === "developer") return "Desenvolvedor";
+      if(mode === "admin") return "Admin";
+      return "Jogador";
+    }
+
+    function canCreateRooms(){
+      return session.admin || session.developer;
+    }
+
+    function setAccessMode(mode){
+      const normalized = ["player","admin","developer"].includes(String(mode)) ? String(mode) : "player";
+      session.role = normalized;
+      session.developer = normalized === "developer";
+      session.admin = normalized === "admin" || normalized === "developer";
+      if(normalized !== "player") session.playerId = "";
+      persistSession();
+      if(session.developer) loadDeveloperRooms(true);
+      render();
+    }
+
+    function accessBadgeHtml(){
+      const mode = accessMode();
+      if(mode === "developer") return `<span class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800">Acesso Desenvolvedor</span>`;
+      if(mode === "admin") return `<span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-800">Acesso Admin</span>`;
+      return `<span class="text-xs px-2 py-1 rounded-full bg-sky-100 text-sky-800">Acesso Jogador</span>`;
     }
 
     function normalizeRoomCode(value){
@@ -631,6 +686,26 @@ async function ensureMeLoaded(){
       }
     }
 
+    async function saveRoomPlan(){
+      if(!session.admin) return alert("Somente admin.");
+      const code = normalizeRoomCode(state.code);
+      if(!code) return alert("Entre em uma sala primeiro.");
+      try{
+        const selected = normalizePlan(String(document.getElementById("roomPlanSelect")?.value || state.plan || "free"));
+        await metaUpdate(code, { plan: selected });
+        state.plan = selected;
+        rememberCurrentGroup(true);
+        render();
+        setInfo(`Plano da sala salvo como ${planLabel(selected)}.`);
+      }catch(e){
+        const msg = e && e.message ? e.message : String(e || "Erro ao salvar plano.");
+        setSyncError(msg);
+        if(/Missing or insufficient permissions/i.test(msg)){
+          alert("O Firestore bloqueou a gravação do plano. Ajuste as Rules do Firebase para permitir update na coleção matches para admins autenticados ou para o seu modo atual de uso.");
+        }
+      }
+    }
+
     // ===============================
     // Nota calculada (interno)
     // ===============================
@@ -793,6 +868,121 @@ async function ensureMeLoaded(){
       }, (err)=> setSyncError(err && err.message ? err.message : err));
     }
 
+    async function loadDeveloperRooms(force = false){
+      if(!db || !session.developer) return;
+      try{
+        state.developerRoomsError = "";
+        const qs = await db.collection("matches").orderBy("updatedAt","desc").limit(50).get();
+        state.developerRooms = qs.docs.map(doc => {
+          const d = doc.data() || {};
+          return {
+            code: String(d.code || doc.id || "").toUpperCase(),
+            roomName: String(d.roomName || ""),
+            roomSubtitle: String(d.roomSubtitle || ""),
+            plan: normalizePlan(d.plan || "free"),
+            open: typeof d.open === "boolean" ? d.open : true,
+            updatedAt: String(d.updatedAt || ""),
+            activeRoundAtMs: Number(d.activeRoundAtMs || 0)
+          };
+        });
+        if(force) render();
+      }catch(e){
+        state.developerRoomsError = e && e.message ? e.message : String(e || "Erro ao carregar salas");
+        if(force) render();
+      }
+    }
+
+    async function developerQuickSavePlan(code, plan){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      try{
+        const selected = normalizePlan(plan);
+        await metaUpdate(code, { plan: selected });
+        if(normalizeRoomCode(state.code) === normalizeRoomCode(code)) state.plan = selected;
+        await loadDeveloperRooms(false);
+        setInfo(`Plano da sala ${String(code).toUpperCase()} salvo como ${planLabel(selected)}.`);
+        render();
+      }catch(e){
+        const msg = e && e.message ? e.message : String(e || "Erro ao salvar plano.");
+        setSyncError(msg);
+      }
+    }
+
+    function openDeveloperRoom(code){
+      joinRoomByCode(code);
+    }
+
+    async function developerResetRoom(code){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      if(!confirm(`Resetar totalmente a sala ${String(code).toUpperCase()}?`)) return;
+      try{
+        await resetRoom(code);
+        await loadDeveloperRooms(false);
+        setInfo(`Sala ${String(code).toUpperCase()} resetada.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao resetar sala."));
+      }
+    }
+
+    async function developerToggleOpenRoom(code, open){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      try{
+        await metaUpdate(code, { open: !!open });
+        if(normalizeRoomCode(state.code) === normalizeRoomCode(code)) state.open = !!open;
+        await loadDeveloperRooms(false);
+        setInfo(`Sala ${String(code).toUpperCase()} ${open ? "aberta" : "fechada"}.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao alterar a sala."));
+      }
+    }
+
+    function renderDeveloperRoomsPanel(){
+      if(!session.developer) return "";
+      const rooms = Array.isArray(state.developerRooms) ? state.developerRooms : [];
+      return `
+        <div class="mt-5 rounded-2xl border bg-amber-50 p-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 class="font-bold text-gray-800">Painel do Desenvolvedor</h3>
+              <p class="text-xs text-gray-600">Visão global das salas, planos e atalhos de suporte.</p>
+            </div>
+            <button id="btnDevRefresh" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar lista</button>
+          </div>
+          ${state.developerRoomsError ? `<div class="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${escapeHtml(state.developerRoomsError)}</div>` : ``}
+          <div class="mt-3 space-y-3 max-h-[420px] overflow-y-auto pr-1">
+            ${rooms.length ? rooms.map(room => `
+              <div class="rounded-xl border bg-white p-3">
+                <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                  <div>
+                    <div class="font-semibold text-gray-800">${escapeHtml(room.roomName || ('Sala ' + room.code))}</div>
+                    <div class="text-xs text-gray-500">Código ${escapeHtml(room.code)}${room.roomSubtitle ? ' · ' + escapeHtml(room.roomSubtitle) : ''}</div>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <span class="text-[11px] px-2 py-1 rounded-full ${room.open ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${room.open ? 'Inscrição aberta' : 'Inscrição fechada'}</span>
+                      <span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planLabel(room.plan))}</span>
+                    </div>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <button data-dev-open="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir sala</button>
+                    <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">${room.open ? 'Fechar sala' : 'Abrir inscrições'}</button>
+                    <button data-dev-reset="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-red-50 text-sm font-semibold">Resetar</button>
+                  </div>
+                </div>
+                <div class="mt-3 flex flex-col sm:flex-row gap-2">
+                  <select data-dev-plan-select="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border flex-1">
+                    <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
+                    <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
+                    <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
+                  </select>
+                  <button data-dev-saveplan="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-semibold">Salvar plano</button>
+                </div>
+              </div>
+            `).join('') : `<div class="rounded-xl border bg-white p-3 text-sm text-gray-500">Nenhuma sala encontrada ainda.</div>`}
+          </div>
+        </div>
+      `;
+    }
+
     async function setPlayer(code, player){
       const c = String(code||"").toUpperCase();
       await playersCol(c).doc(player.id).set(player, { merge:true });
@@ -876,16 +1066,17 @@ async function ensureMeLoaded(){
     // ===============================
     async function createRoom(){
       try{
+        if(!canCreateRooms()) return alert("A criação de salas fica disponível para Admin ou Desenvolvedor.");
         const code = genCode(6);
         await ensureRoom(code);
         state.code = code;
         session.code = code;
         session.playerId = "";
-        session.admin = false;
         persistSession();
         syncRoomUrl(code);
         attachRoom(code);
         rememberCurrentGroup(true);
+        if(session.developer) loadDeveloperRooms(false);
         setInfo("Sala criada. Compartilhe o código ou o link da sala para os outros entrarem.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -898,17 +1089,22 @@ async function ensureMeLoaded(){
         state.code = code;
         session.code = code;
 
-        // Mantém o login (playerId/admin) se você estiver reentrando na MESMA sala
         if(code !== prevCode){
           session.playerId = "";
-          session.admin = false;
+          session.prevPlayerId = "";
         }
         persistSession();
         syncRoomUrl(code);
         await ensureRoom(code);
         attachRoom(code);
         rememberCurrentGroup(true);
-        setInfo("<b>Entrou na sala.</b> Agora inscreva seu nome ou entre com seu Código do Jogador.");
+        const mode = accessMode();
+        const entryMsg = mode === "developer"
+          ? "<b>Entrou na sala como Desenvolvedor.</b> Você tem visão e controle avançado desta sala."
+          : mode === "admin"
+            ? "<b>Entrou na sala como Admin.</b> Os controles administrativos já estão liberados."
+            : "<b>Entrou na sala.</b> Agora inscreva seu nome ou entre com seu Código do Jogador.";
+        setInfo(entryMsg);
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -921,7 +1117,7 @@ async function ensureMeLoaded(){
       detachRoom();
       session.code = "";
       session.playerId = "";
-      session.admin = false;
+      session.prevPlayerId = "";
       persistSession();
       state.code = "";
       syncRoomUrl("");
@@ -1190,14 +1386,32 @@ async function markPresence(present){
     // Admin
     // ===============================
     function adminLogin(){
-      const pass = ($("adminPass")?.value || "").trim();
-      if(pass !== ADMIN_PASS) return alert("Senha incorreta.");
-      session.admin = true;
-      persistSession();
-      if($("adminPass")) $("adminPass").value = "";
-      render();
+      const pass = ($("homeAdminPass")?.value || "").trim();
+      if(pass !== ADMIN_PASS) return alert("Senha admin inválida.");
+      setAccessMode("admin");
+      if($("homeAdminPass")) $("homeAdminPass").value = "";
+      setInfo("Modo Admin ativado.");
     }
-    function adminLogout(){ session.admin = false; persistSession(); render(); }
+
+    function developerLogin(){
+      const pass = ($("homeDeveloperPass")?.value || "").trim();
+      if(pass !== DEVELOPER_PASS) return alert("Senha de Desenvolvedor inválida.");
+      setAccessMode("developer");
+      if($("homeDeveloperPass")) $("homeDeveloperPass").value = "";
+      setInfo("Modo Desenvolvedor ativado.");
+    }
+
+    function playerLogin(){
+      setAccessMode("player");
+      setInfo("Modo Jogador ativado.");
+    }
+
+    function adminLogout(){
+      session.playerId = "";
+      session.prevPlayerId = "";
+      setAccessMode("player");
+      setInfo("Você voltou ao modo Jogador.");
+    }
 
     async function toggleOpen(){
       if(!session.admin) return alert("Somente admin.");
@@ -1701,6 +1915,91 @@ function openWhatsApp(text, numberDigits){
       `;
     }
 
+    function renderLobby(savedGroups, allSavedGroupsCount, groupsLimit){
+      const mode = accessMode();
+      const canCreate = canCreateRooms();
+      const modeText = mode === "developer"
+        ? "Você entra com acesso global, sem precisar agir como jogador dentro da sala."
+        : mode === "admin"
+          ? "Os controles administrativos já ficam liberados quando você entra na sala."
+          : "Modo ideal para participantes confirmarem presença, escolherem time e avaliarem.";
+      return `
+        <div class="mt-6 rounded-2xl border bg-gray-50 p-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 class="font-bold text-gray-800">Escolha seu tipo de acesso</h3>
+              <p class="text-sm text-gray-600">Modo atual: <b>${escapeHtml(accessModeLabel())}</b>. ${escapeHtml(modeText)}</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              ${accessBadgeHtml()}
+              ${mode !== 'player' ? `<button id="btnAccessLogout" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Voltar para Jogador</button>` : ``}
+            </div>
+          </div>
+          <div class="mt-4 grid gap-3 lg:grid-cols-3">
+            <div class="rounded-2xl border bg-white p-4">
+              <div class="text-sm font-bold text-sky-700">Jogador</div>
+              <p class="mt-1 text-xs text-gray-600">Para entrar na sala, confirmar presença, escolher time e avaliar.</p>
+              <button id="btnAccessPlayer" class="mt-3 w-full px-3 py-2 rounded-lg bg-sky-600 text-white hover:bg-sky-700 font-semibold">Entrar como Jogador</button>
+            </div>
+            <div class="rounded-2xl border bg-white p-4">
+              <div class="text-sm font-bold text-gray-800">Admin</div>
+              <p class="mt-1 text-xs text-gray-600">Para organizar uma sala específica sem login extra dentro dela.</p>
+              <input id="homeAdminPass" type="password" placeholder="Senha admin" class="mt-3 w-full px-3 py-2 rounded-lg border" />
+              <button id="btnAccessAdmin" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Entrar como Admin</button>
+            </div>
+            <div class="rounded-2xl border bg-white p-4">
+              <div class="text-sm font-bold text-amber-700">Desenvolvedor</div>
+              <p class="mt-1 text-xs text-gray-600">Acesso mestre ao sistema inteiro, salas, planos e suporte.</p>
+              <input id="homeDeveloperPass" type="password" placeholder="Senha Desenvolvedor" class="mt-3 w-full px-3 py-2 rounded-lg border" />
+              <button id="btnAccessDeveloper" class="mt-2 w-full px-3 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 font-semibold">Entrar como Desenvolvedor</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-6 grid gap-3 sm:grid-cols-3">
+          <input id="roomCode" placeholder="Código da partida (ex.: A2K9ZP)" class="px-3 py-2 rounded-lg border sm:col-span-2" />
+          <div class="flex gap-2">
+            <button id="btnJoin" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">Entrar</button>
+            <button id="btnCreate" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${canCreate ? '' : 'opacity-50 cursor-not-allowed'}" ${canCreate ? '' : 'disabled'}>Criar nova</button>
+          </div>
+        </div>
+        <div class="mt-3 text-sm text-gray-600">
+          Dica: use sempre o mesmo código da sala para manter as notas de semana a semana. ${canCreate ? '' : 'A criação de nova sala fica liberada para Admin e Desenvolvedor.'}
+        </div>
+
+        <div class="mt-5 rounded-2xl border bg-gray-50 p-4">
+          <div class="flex items-center justify-between gap-2">
+            <div>
+              <h3 class="font-bold text-gray-800">Múltiplos grupos</h3>
+              <p class="text-xs text-gray-500">Salve seus grupos para entrar com um toque.</p>
+            </div>
+            <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? '∞' : groupsLimit} grupo(s)</span>
+          </div>
+
+          ${savedGroups.length ? `
+            <div class="mt-3 space-y-2">
+              ${savedGroups.map(g => `
+                <div class="rounded-xl border bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <div class="font-semibold text-gray-800">${escapeHtml(g.roomName || ('Grupo ' + g.code))}</div>
+                    <div class="text-xs text-gray-500">Sala ${escapeHtml(g.code)}${g.roomSubtitle ? ' · ' + escapeHtml(g.roomSubtitle) : ''}</div>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <button data-open-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir</button>
+                    <button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <div class="mt-3 text-sm text-gray-500">Nenhum grupo salvo ainda. Entre em uma sala e clique em <b>Salvar este grupo</b>.</div>
+          `}
+          ${!featureAllowed('multiGroups') ? `<div class="mt-3">${premiumLockCard('Múltiplos grupos', 'No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.', 'múltiplos grupos')}</div>` : ``}
+        </div>
+        ${renderDeveloperRoomsPanel()}
+      `;
+    }
+
     function render(){
       const app = $("app");
       const code = (state.code || "").toUpperCase();
@@ -1714,6 +2013,7 @@ function openWhatsApp(text, numberDigits){
       const byTarget = byTargetScores(state.ratings||{});
       const plan = currentPlan();
       const planName = planLabel(plan);
+      const accessName = accessModeLabel();
       const groupsLimit = maxGroupsForPlan(plan);
       const savedGroups = getSavedGroupsForCurrentPlan();
       const allSavedGroupsCount = getSavedGroups().length;
@@ -1775,7 +2075,7 @@ function openWhatsApp(text, numberDigits){
                   <div>⌛ Faltam <b>${escapeHtml(countdownLabel)}</b></div>
                 </div>
               ` : ``}
-              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planName)}</span></div>
+              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planName)}</span>${accessBadgeHtml()}</div>
             </div>
 
             <div class="flex flex-wrap gap-2 items-center">
@@ -1803,48 +2103,7 @@ function openWhatsApp(text, numberDigits){
             </div>
           ` : ``}
 
-          ${!code ? `
-            <div class="mt-6 grid gap-3 sm:grid-cols-3">
-              <input id="roomCode" placeholder="Código da partida (ex.: A2K9ZP)" class="px-3 py-2 rounded-lg border sm:col-span-2" />
-              <div class="flex gap-2">
-                <button id="btnJoin" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">Entrar</button>
-                <button id="btnCreate" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Criar nova</button>
-              </div>
-            </div>
-            <div class="mt-3 text-sm text-gray-600">
-              Dica: use sempre o mesmo código da sala para manter as notas de semana a semana.
-            </div>
-
-            <div class="mt-5 rounded-2xl border bg-gray-50 p-4">
-              <div class="flex items-center justify-between gap-2">
-                <div>
-                  <h3 class="font-bold text-gray-800">Múltiplos grupos</h3>
-                  <p class="text-xs text-gray-500">Salve seus grupos para entrar com um toque.</p>
-                </div>
-                <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit} grupo(s)</span>
-              </div>
-
-              ${savedGroups.length ? `
-                <div class="mt-3 space-y-2">
-                  ${savedGroups.map(g => `
-                    <div class="rounded-xl border bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                      <div>
-                        <div class="font-semibold text-gray-800">${escapeHtml(g.roomName || ("Grupo " + g.code))}</div>
-                        <div class="text-xs text-gray-500">Sala ${escapeHtml(g.code)}${g.roomSubtitle ? " · " + escapeHtml(g.roomSubtitle) : ""}</div>
-                      </div>
-                      <div class="flex flex-wrap gap-2">
-                        <button data-open-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir</button>
-                        <button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>
-                      </div>
-                    </div>
-                  `).join("")}
-                </div>
-              ` : `
-                <div class="mt-3 text-sm text-gray-500">Nenhum grupo salvo ainda. Entre em uma sala e clique em <b>Salvar este grupo</b>.</div>
-              `}
-              ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Múltiplos grupos", "No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.", "múltiplos grupos")}</div>` : ``}
-            </div>
-          ` : `
+          ${!code ? `${renderLobby(savedGroups, allSavedGroupsCount, groupsLimit)}` : `
             <div class="mt-4 grid gap-4 lg:grid-cols-3">
               <div class="lg:col-span-1 bg-white rounded-2xl border p-4 space-y-3">
                 <div class="flex items-center justify-between">
@@ -2101,15 +2360,15 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
                 <div class="border-t pt-3">
-                  <h3 class="font-semibold mb-2">Admin</h3>
+                  <h3 class="font-semibold mb-2">Gestão da sala</h3>
                   ${session.admin ? `
-                    <div class="text-sm text-green-700 font-semibold">✓ Admin ativo</div>
+                    <div class="text-sm text-green-700 font-semibold">✓ ${session.developer ? "Desenvolvedor ativo" : "Admin ativo"}</div>
                     <div class="mt-2 flex flex-wrap gap-2">
                       <button id="btnToggleOpen" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">${state.open ? "Fechar" : "Abrir"} inscrição</button>
                       <button id="btnNewRound" class="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold">Nova rodada</button>
                       <button id="btnSort" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sortear equilibrado</button>
                       <button id="btnReset" class="px-3 py-2 rounded-lg bg-red-700 text-white hover:bg-red-800 font-semibold">Resetar</button>
-                      <button id="btnAdminOut" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sair admin</button>
+                      <button id="btnAdminOut" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">${session.developer ? "Sair do modo Desenvolvedor" : "Sair do modo Admin"}</button>
                     </div>
                     <div class="text-xs text-gray-500 mt-2">
                       <b>Nova rodada</b>: todo mundo volta a <b>Ausente</b> e confirma presença novamente. <b>Resetar</b> zera tudo.
@@ -2178,9 +2437,8 @@ function openWhatsApp(text, numberDigits){
                       `}
                     </div>
                   ` : `
-                    <div class="flex gap-2">
-                      <input id="adminPass" type="password" placeholder="Senha admin" class="px-3 py-2 rounded-lg border flex-1" />
-                      <button id="btnAdminIn" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Entrar</button>
+                    <div class="rounded-xl border bg-gray-50 p-3 text-sm text-gray-600">
+                      Os acessos <b>Admin</b> e <b>Desenvolvedor</b> agora são escolhidos na tela inicial antes de entrar na sala.
                     </div>
                   `}
                 </div>
@@ -2423,7 +2681,38 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
           });
         });
 
-        if($("btnAdminIn")) $("btnAdminIn").onclick = ()=> adminLogin();
+        if($("btnDevRefresh")) $("btnDevRefresh").onclick = ()=> loadDeveloperRooms(true);
+        document.querySelectorAll("[data-dev-open]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-open");
+            openDeveloperRoom(roomCode);
+          });
+        });
+        document.querySelectorAll("[data-dev-saveplan]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-saveplan");
+            const select = document.querySelector(`[data-dev-plan-select="${roomCode}"]`);
+            developerQuickSavePlan(roomCode, select ? select.value : "free");
+          });
+        });
+        document.querySelectorAll("[data-dev-reset]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-reset");
+            developerResetRoom(roomCode);
+          });
+        });
+        document.querySelectorAll("[data-dev-toggle]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-toggle");
+            const openState = btn.getAttribute("data-dev-openstate") === "1";
+            developerToggleOpenRoom(roomCode, openState);
+          });
+        });
+
+        if($("btnAccessPlayer")) $("btnAccessPlayer").onclick = ()=> playerLogin();
+        if($("btnAccessAdmin")) $("btnAccessAdmin").onclick = ()=> adminLogin();
+        if($("btnAccessDeveloper")) $("btnAccessDeveloper").onclick = ()=> developerLogin();
+        if($("btnAccessLogout")) $("btnAccessLogout").onclick = ()=> adminLogout();
         if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
         if($("btnSaveSchedule")) $("btnSaveSchedule").onclick = ()=> saveMatchSchedule();
         if($("btnClearSchedule")) $("btnClearSchedule").onclick = ()=> clearMatchSchedule();
@@ -2505,6 +2794,7 @@ window.addEventListener("unhandledrejection", (ev)=>{
       }
 
       render();
+      if(session.developer) loadDeveloperRooms(true);
 
       const roomFromQuery = roomCodeFromUrl();
       const lastRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, "") || "");
