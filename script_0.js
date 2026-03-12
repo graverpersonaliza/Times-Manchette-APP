@@ -1258,10 +1258,38 @@ async function ensureMeLoaded(){
           state.open = true;
         }
         await loadDeveloperRooms(false);
-        setInfo(`Sala ${safeCode} convertida para ${planLabel(selectedPlan)} com vencimento em ${fmtDatePt(nextPaid)}.`);
+        setInfo(`Sala ${safeCode} convertida para ${planLabel(selectedPlan)} mensal, com vencimento em ${fmtDatePt(nextPaid)}.`);
         render();
       }catch(e){
         setSyncError(e && e.message ? e.message : String(e || "Erro ao converter teste para pago."));
+      }
+    }
+
+    async function developerSetLifetimePlan(code, plan = "basico"){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      if(guardProtectedRoomMutation(code, "ativação vitalícia")) return;
+      const safeCode = normalizeRoomCode(code);
+      const selectedPlan = normalizePlan(plan || "basico");
+      try{
+        await metaUpdate(safeCode, {
+          plan: selectedPlan,
+          commercialStatus: "ativo",
+          trialEndsAt: "",
+          paidUntil: "",
+          open: true
+        });
+        if(normalizeRoomCode(state.code) === safeCode){
+          state.plan = selectedPlan;
+          state.commercialStatus = "ativo";
+          state.trialEndsAt = "";
+          state.paidUntil = "";
+          state.open = true;
+        }
+        await loadDeveloperRooms(false);
+        setInfo(`Sala ${safeCode} ativada como ${planLabel(selectedPlan)} vitalício.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao ativar plano vitalício."));
       }
     }
 
@@ -1583,38 +1611,54 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
                 <input data-dev-adminpass="${escapeHtml(room.code)}" placeholder="Nova senha admin" class="px-2.5 py-2 rounded-lg border text-xs" ${lockField} />
               </div>
               <div class="mt-2 grid gap-2 md:grid-cols-4">
-                <select data-dev-plan-select="${escapeHtml(room.code)}" class="px-2.5 py-2 rounded-lg border text-xs" ${lockField}>
-                  <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
-                  <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
-                  <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
-                </select>
-                <select data-dev-status="${escapeHtml(room.code)}" class="px-2.5 py-2 rounded-lg border text-xs" ${lockField}>
-                  <option value="teste" ${normalizeCommercialStatus(room.commercialStatus)==='teste' ? 'selected' : ''}>Teste</option>
-                  <option value="ativo" ${normalizeCommercialStatus(room.commercialStatus)==='ativo' ? 'selected' : ''}>Ativo</option>
-                  <option value="inativo" ${normalizeCommercialStatus(room.commercialStatus)==='inativo' ? 'selected' : ''}>Inativo</option>
-                  <option value="inadimplente" ${normalizeCommercialStatus(room.commercialStatus)==='inadimplente' ? 'selected' : ''}>Inadimplente</option>
-                  <option value="bloqueado" ${normalizeCommercialStatus(room.commercialStatus)==='bloqueado' ? 'selected' : ''}>Bloqueado</option>
-                  <option value="demo" ${normalizeCommercialStatus(room.commercialStatus)==='demo' ? 'selected' : ''}>Demonstração</option>
-                </select>
-                <input data-dev-trial="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.trialEndsAt || ''))}" class="px-2.5 py-2 rounded-lg border text-xs" ${lockField} />
-                <input data-dev-paiduntil="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.paidUntil || ''))}" class="px-2.5 py-2 rounded-lg border text-xs" ${lockField} />
+                <label class="block">
+                  <span class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-gray-500">Plano da sala</span>
+                  <select data-dev-plan-select="${escapeHtml(room.code)}" class="w-full px-2.5 py-2 rounded-lg border text-xs" ${lockField}>
+                    <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
+                    <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
+                    <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
+                  </select>
+                </label>
+                <label class="block">
+                  <span class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-gray-500">Status comercial</span>
+                  <select data-dev-status="${escapeHtml(room.code)}" class="w-full px-2.5 py-2 rounded-lg border text-xs" ${lockField}>
+                    <option value="teste" ${normalizeCommercialStatus(room.commercialStatus)==='teste' ? 'selected' : ''}>Teste</option>
+                    <option value="ativo" ${normalizeCommercialStatus(room.commercialStatus)==='ativo' ? 'selected' : ''}>Ativo</option>
+                    <option value="inativo" ${normalizeCommercialStatus(room.commercialStatus)==='inativo' ? 'selected' : ''}>Inativo</option>
+                    <option value="inadimplente" ${normalizeCommercialStatus(room.commercialStatus)==='inadimplente' ? 'selected' : ''}>Inadimplente</option>
+                    <option value="bloqueado" ${normalizeCommercialStatus(room.commercialStatus)==='bloqueado' ? 'selected' : ''}>Bloqueado</option>
+                    <option value="demo" ${normalizeCommercialStatus(room.commercialStatus)==='demo' ? 'selected' : ''}>Demonstração</option>
+                  </select>
+                </label>
+                <label class="block">
+                  <span class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-gray-500">Fim do teste grátis</span>
+                  <input data-dev-trial="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.trialEndsAt || ''))}" class="w-full px-2.5 py-2 rounded-lg border text-xs" ${lockField} />
+                  <span class="mt-1 block text-[10px] text-gray-500">Use quando a sala estiver em teste.</span>
+                </label>
+                <label class="block">
+                  <span class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-gray-500">Vencimento mensal</span>
+                  <input data-dev-paiduntil="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.paidUntil || ''))}" class="w-full px-2.5 py-2 rounded-lg border text-xs" ${lockField} />
+                  <span class="mt-1 block text-[10px] text-gray-500">Deixe vazio para plano vitalício.</span>
+                </label>
               </div>
               <textarea data-dev-notes="${escapeHtml(room.code)}" placeholder="Observações do cliente, cobrança e suporte" class="mt-2 w-full px-2.5 py-2 rounded-lg border text-xs min-h-[64px]" ${lockField}>${escapeHtml(room.clientNotes || '')}</textarea>
               <div class="mt-2 flex flex-wrap gap-1.5">
-                <button data-dev-saveall="${escapeHtml(room.code)}" onclick="developerSaveRoomAll('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Salvar</button>
-                <button data-dev-open="${escapeHtml(room.code)}" onclick="openDeveloperRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Abrir</button>
-                <button data-dev-copylink="${escapeHtml(room.code)}" onclick="copyToClipboard(buildRoomUrl('${escapeHtml(room.code)}'))" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Link</button>
-                <button data-dev-copyaccess="${escapeHtml(room.code)}" onclick="developerCopyAdminAccess('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Acesso</button>
-                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" onclick="developerToggleOpenRoom('${escapeHtml(room.code)}', ${room.open ? 'false' : 'true'})" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>${room.open ? 'Fechar' : 'Abrir'}</button>
-                <button data-dev-activate="${escapeHtml(room.code)}" onclick="developerSetCommercialStatus('${escapeHtml(room.code)}', 'ativo')" type="button" class="px-2 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Ativar</button>
-                <button data-dev-block="${escapeHtml(room.code)}" onclick="developerSetCommercialStatus('${escapeHtml(room.code)}', 'bloqueado')" type="button" class="px-2 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Bloquear</button>
-                <button data-dev-extendtrial="${escapeHtml(room.code)}" onclick="developerExtendTrial('${escapeHtml(room.code)}', 7)" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-sky-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>+7d</button>
-                <button data-dev-renewmonth="${escapeHtml(room.code)}" onclick="developerRenewMonthly('${escapeHtml(room.code)}', 1)" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-emerald-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>+1 mês</button>
-                <button data-dev-convert-basic="${escapeHtml(room.code)}" onclick="developerConvertTrialToPaid('${escapeHtml(room.code)}', 'basico')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-blue-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Básico</button>
-                <button data-dev-convert-pro="${escapeHtml(room.code)}" onclick="developerConvertTrialToPaid('${escapeHtml(room.code)}', 'pro')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-violet-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>PRO</button>
-                <button data-dev-reset="${escapeHtml(room.code)}" onclick="developerResetRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-red-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Resetar</button>
-                <button data-dev-copyclient="${escapeHtml(room.code)}" onclick="developerCopyClientSummary('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Resumo</button>
-                <button data-dev-remove="${escapeHtml(room.code)}" onclick="developerDeleteRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 text-[11px] font-semibold">Remover</button>
+                <button data-dev-saveall="${escapeHtml(room.code)}" onclick="developerSaveRoomAll('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Salvar dados</button>
+                <button data-dev-open="${escapeHtml(room.code)}" onclick="openDeveloperRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Abrir sala</button>
+                <button data-dev-copylink="${escapeHtml(room.code)}" onclick="copyToClipboard(buildRoomUrl('${escapeHtml(room.code)}'))" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Copiar link</button>
+                <button data-dev-copyaccess="${escapeHtml(room.code)}" onclick="developerCopyAdminAccess('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Copiar acesso admin</button>
+                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" onclick="developerToggleOpenRoom('${escapeHtml(room.code)}', ${room.open ? 'false' : 'true'})" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>${room.open ? 'Fechar sala' : 'Reabrir sala'}</button>
+                <button data-dev-activate="${escapeHtml(room.code)}" onclick="developerSetCommercialStatus('${escapeHtml(room.code)}', 'ativo')" type="button" class="px-2 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Ativar sala</button>
+                <button data-dev-block="${escapeHtml(room.code)}" onclick="developerSetCommercialStatus('${escapeHtml(room.code)}', 'bloqueado')" type="button" class="px-2 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Bloquear sala</button>
+                <button data-dev-extendtrial="${escapeHtml(room.code)}" onclick="developerExtendTrial('${escapeHtml(room.code)}', 7)" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-sky-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Prorrogar +7 dias</button>
+                <button data-dev-renewmonth="${escapeHtml(room.code)}" onclick="developerRenewMonthly('${escapeHtml(room.code)}', 1)" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-emerald-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Renovar +1 mês</button>
+                <button data-dev-convert-basic="${escapeHtml(room.code)}" onclick="developerConvertTrialToPaid('${escapeHtml(room.code)}', 'basico')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-blue-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Básico mensal</button>
+                <button data-dev-convert-pro="${escapeHtml(room.code)}" onclick="developerConvertTrialToPaid('${escapeHtml(room.code)}', 'pro')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-violet-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>PRO mensal</button>
+                <button data-dev-life-basic="${escapeHtml(room.code)}" onclick="developerSetLifetimePlan('${escapeHtml(room.code)}', 'basico')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-blue-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Básico vitalício</button>
+                <button data-dev-life-pro="${escapeHtml(room.code)}" onclick="developerSetLifetimePlan('${escapeHtml(room.code)}', 'pro')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-violet-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>PRO vitalício</button>
+                <button data-dev-reset="${escapeHtml(room.code)}" onclick="developerResetRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-red-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Resetar sala</button>
+                <button data-dev-copyclient="${escapeHtml(room.code)}" onclick="developerCopyClientSummary('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Copiar resumo</button>
+                <button data-dev-remove="${escapeHtml(room.code)}" onclick="developerDeleteRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 text-[11px] font-semibold">Remover sala</button>
               </div>
             </div>
           `;
@@ -3044,22 +3088,7 @@ function openWhatsApp(text, numberDigits){
                       </div>
                       <button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar este grupo</button>
                     </div>
-                    ${savedGroups.length ? `
-                      <div class="mt-3 space-y-2">
-                        ${savedGroups.slice(0,4).map(g => `
-                          <div class="rounded-lg border bg-white px-3 py-2 flex items-center justify-between gap-2">
-                            <div class="min-w-0">
-                              <div class="text-sm font-semibold text-gray-800 truncate">${escapeHtml(g.roomName || ("Grupo " + g.code))}</div>
-                              <div class="text-[11px] text-gray-500 truncate">Sala ${escapeHtml(g.code)}</div>
-                            </div>
-                            <div class="flex gap-2">
-                              <button data-open-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Abrir</button>
-                              ${accessMode() !== 'player' ? `<button data-delete-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Excluir</button>` : ``}
-                            </div>
-                          </div>
-                        `).join("")}
-                      </div>
-                    ` : `<div class="mt-2 text-xs text-gray-500">Salve este grupo para alternar rapidamente entre várias salas.</div>`}
+                    <div class="mt-2 text-xs text-gray-500">Os outros grupos salvos aparecem somente fora da sala, na tela inicial.</div>
                     ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos", "O plano Free salva 1 grupo. Faça upgrade para liberar 3 grupos no Básico ou grupos ilimitados no PRO.", "múltiplos grupos")}</div>` : ``}
                   </div>
                 </div>
