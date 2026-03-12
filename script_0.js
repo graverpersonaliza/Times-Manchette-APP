@@ -320,6 +320,7 @@ function safeBoldInfo(s){
     }
 
     function featureAllowed(feature){
+      if(session.developer) return true;
       const plan = currentPlan();
       if(feature === "multiGroups") return maxGroupsForPlan(plan) > 1;
       if(feature === "history") return plan === "basico" || plan === "pro";
@@ -1529,10 +1530,10 @@ function renderDeveloperRoomsPanel(){
           </div>
         </div>
         <div class="flex flex-wrap gap-2">
-          <button id="btnCreateTrialRoom" class="px-3 py-2 rounded-lg bg-sky-600 text-white hover:bg-sky-700 text-sm font-semibold">Criar teste grátis</button>
-          <button id="btnDevCloseAllOpen" class="px-3 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-sm font-semibold">Fechar todas abertas</button>
-<button id="btnDevDeleteExceptProtected" class="px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 text-sm font-semibold">Remover inativas / órfãs</button>
-          <button id="btnDevRefresh" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar</button>
+          <button id="btnCreateTrialRoom" onclick="createFreeTrialRoom()" type="button" class="px-3 py-2 rounded-lg bg-sky-600 text-white hover:bg-sky-700 text-sm font-semibold">Criar teste grátis</button>
+          <button id="btnDevCloseAllOpen" onclick="developerCloseAllOpenRooms()" type="button" class="px-3 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-sm font-semibold">Fechar todas abertas</button>
+<button id="btnDevDeleteExceptProtected" onclick="developerDeleteAllExceptProtected()" type="button" class="px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 text-sm font-semibold">Remover inativas / órfãs</button>
+          <button id="btnDevRefresh" onclick="loadDeveloperRooms(true)" type="button" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar</button>
         </div>
       </div>
       <div class="mt-3 flex flex-col gap-3 lg:flex-row">
@@ -1600,20 +1601,20 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
               </div>
               <textarea data-dev-notes="${escapeHtml(room.code)}" placeholder="Observações do cliente, cobrança e suporte" class="mt-2 w-full px-2.5 py-2 rounded-lg border text-xs min-h-[64px]" ${lockField}>${escapeHtml(room.clientNotes || '')}</textarea>
               <div class="mt-2 flex flex-wrap gap-1.5">
-                <button data-dev-saveall="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Salvar</button>
-                <button data-dev-open="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Abrir</button>
-                <button data-dev-copylink="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Link</button>
-                <button data-dev-copyaccess="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Acesso</button>
-                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>${room.open ? 'Fechar' : 'Abrir'}</button>
-                <button data-dev-activate="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Ativar</button>
-                <button data-dev-block="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Bloquear</button>
-                <button data-dev-extendtrial="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-sky-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>+7d</button>
-                <button data-dev-renewmonth="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-emerald-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>+1 mês</button>
-                <button data-dev-convert-basic="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-blue-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Básico</button>
-                <button data-dev-convert-pro="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-violet-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>PRO</button>
-                <button data-dev-reset="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-red-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Resetar</button>
-                <button data-dev-copyclient="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Resumo</button>
-                <button data-dev-remove="${escapeHtml(room.code)}" class="px-2 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 text-[11px] font-semibold">Remover</button>
+                <button data-dev-saveall="${escapeHtml(room.code)}" onclick="developerSaveRoomAll('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Salvar</button>
+                <button data-dev-open="${escapeHtml(room.code)}" onclick="openDeveloperRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Abrir</button>
+                <button data-dev-copylink="${escapeHtml(room.code)}" onclick="copyToClipboard(buildRoomUrl('${escapeHtml(room.code)}'))" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Link</button>
+                <button data-dev-copyaccess="${escapeHtml(room.code)}" onclick="developerCopyAdminAccess('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Acesso</button>
+                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" onclick="developerToggleOpenRoom('${escapeHtml(room.code)}', ${room.open ? 'false' : 'true'})" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>${room.open ? 'Fechar' : 'Abrir'}</button>
+                <button data-dev-activate="${escapeHtml(room.code)}" onclick="developerSetCommercialStatus('${escapeHtml(room.code)}', 'ativo')" type="button" class="px-2 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Ativar</button>
+                <button data-dev-block="${escapeHtml(room.code)}" onclick="developerSetCommercialStatus('${escapeHtml(room.code)}', 'bloqueado')" type="button" class="px-2 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Bloquear</button>
+                <button data-dev-extendtrial="${escapeHtml(room.code)}" onclick="developerExtendTrial('${escapeHtml(room.code)}', 7)" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-sky-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>+7d</button>
+                <button data-dev-renewmonth="${escapeHtml(room.code)}" onclick="developerRenewMonthly('${escapeHtml(room.code)}', 1)" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-emerald-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>+1 mês</button>
+                <button data-dev-convert-basic="${escapeHtml(room.code)}" onclick="developerConvertTrialToPaid('${escapeHtml(room.code)}', 'basico')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-blue-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Básico</button>
+                <button data-dev-convert-pro="${escapeHtml(room.code)}" onclick="developerConvertTrialToPaid('${escapeHtml(room.code)}', 'pro')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-violet-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>PRO</button>
+                <button data-dev-reset="${escapeHtml(room.code)}" onclick="developerResetRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-red-50 text-[11px] font-semibold ${lockMuted}" ${lockButton}>Resetar</button>
+                <button data-dev-copyclient="${escapeHtml(room.code)}" onclick="developerCopyClientSummary('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Resumo</button>
+                <button data-dev-remove="${escapeHtml(room.code)}" onclick="developerDeleteRoom('${escapeHtml(room.code)}')" type="button" class="px-2 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 text-[11px] font-semibold">Remover</button>
               </div>
             </div>
           `;
@@ -1767,7 +1768,8 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
 
     function openDemoRoom(){
       setAccessMode("player");
-      joinRoomByCode(DEVELOPER_PROTECTED_ROOM);
+      setInfo("A demonstração visual fica no site comercial. Para testar de verdade, use 'Criar teste grátis' ou entre com um código válido.");
+      render();
     }
 
     async function joinRoomByCode(rawCode){
@@ -2690,7 +2692,7 @@ function openWhatsApp(text, numberDigits){
                   </div>
                   <div class="flex flex-wrap gap-2">
                     <button data-open-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir</button>
-                    <button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>
+                    ${mode !== 'player' ? `<button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>` : ``}
                   </div>
                 </div>
               `).join('')}
@@ -3054,7 +3056,7 @@ function openWhatsApp(text, numberDigits){
                             </div>
                             <div class="flex gap-2">
                               <button data-open-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Abrir</button>
-                              <button data-delete-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Excluir</button>
+                              ${accessMode() !== 'player' ? `<button data-delete-group="${escapeHtml(g.code)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Excluir</button>` : ``}
                             </div>
                           </div>
                         `).join("")}
