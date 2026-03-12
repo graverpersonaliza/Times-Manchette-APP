@@ -2638,7 +2638,6 @@ function openWhatsApp(text, numberDigits){
               <p class="text-sm text-gray-600">Modo atual: <b>${escapeHtml(accessModeLabel())}</b>. ${escapeHtml(modeText)}</p>
             </div>
             <div class="flex flex-wrap gap-2">
-              ${accessBadgeHtml()}
               ${mode !== 'player' ? `<button id="btnAccessLogout" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Voltar para Jogador</button>` : ``}
             </div>
           </div>
@@ -2783,8 +2782,7 @@ function openWhatsApp(text, numberDigits){
                   <div>⌛ Faltam <b>${escapeHtml(countdownLabel)}</b></div>
                 </div>
               ` : ``}
-              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planName)}</span><span class="text-xs px-2 py-1 rounded-full ${commercialStatusClass(state.commercialStatus)}">${escapeHtml(commercialStatusLabel(state.commercialStatus))}</span>${accessBadgeHtml()}</div>
-              ${commercialSummary ? `<div class="mt-2 text-xs text-gray-500">${escapeHtml(commercialSummary)}</div>` : ``}
+              ${state.room ? `` : ``}
             </div>
 
             <div class="flex flex-wrap gap-2 items-center">
