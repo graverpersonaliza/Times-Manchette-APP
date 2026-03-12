@@ -35,14 +35,23 @@
     // Limite de jogadores por time (6x6)
     const TEAM_MAX = 6;
     const SUPPORT_WHATSAPP = "5554999778707";
+    const DEVELOPER_PROTECTED_ROOM = "GNYT7H";
 
     const PLAN_ORDER = { free: 0, basico: 1, pro: 2 };
     const PLAN_LABELS = { free: "Free", basico: "Básico", pro: "PRO" };
+    const COMMERCIAL_LABELS = {
+      demo: "Demonstração",
+      teste: "Teste",
+      ativo: "Ativo",
+      inativo: "Inativo",
+      inadimplente: "Inadimplente",
+      bloqueado: "Bloqueado"
+    };
 
     // ===============================
     // Estado
     // ===============================
-    let session = normalizeSession(load(LS_SESSION, { code:"", playerId:"", prevPlayerId:"", admin:false, developer:false, role:"player" }));
+    let session = normalizeSession(load(LS_SESSION, { code:"", playerId:"", prevPlayerId:"", admin:false, developer:false, role:"player", adminPassDraft:"" }));
 
     let state = {
       code: "",
@@ -69,8 +78,16 @@
       team2Name: "Time 2",
       themeColor: "#2563eb",
       plan: "free",
+      ownerName: "",
+      ownerWhatsApp: "",
+      commercialStatus: "ativo",
+      trialEndsAt: "",
+      paidUntil: "",
+      clientNotes: "",
+      adminPassStored: "",
       developerRooms: [],
-      developerRoomsError: ""
+      developerRoomsError: "",
+      developerFilter: ""
     };
 
     let db = null;
@@ -190,7 +207,7 @@ function safeBoldInfo(s){
     }
 
     function normalizeSession(raw){
-      const base = Object.assign({ code:"", playerId:"", prevPlayerId:"", admin:false, developer:false, role:"player" }, raw || {});
+      const base = Object.assign({ code:"", playerId:"", prevPlayerId:"", admin:false, developer:false, role:"player", adminPassDraft:"" }, raw || {});
       if(base.role === "developer" || base.developer){
         base.role = "developer";
         base.developer = true;
@@ -204,6 +221,7 @@ function safeBoldInfo(s){
         base.developer = false;
         base.admin = false;
       }
+      base.adminPassDraft = String(base.adminPassDraft || "");
       return base;
     }
 
@@ -229,6 +247,7 @@ function safeBoldInfo(s){
       session.developer = normalized === "developer";
       session.admin = normalized === "admin" || normalized === "developer";
       if(normalized !== "player") session.playerId = "";
+      if(normalized === "player") session.adminPassDraft = "";
       persistSession();
       if(session.developer) loadDeveloperRooms(true);
       render();
@@ -243,6 +262,10 @@ function safeBoldInfo(s){
 
     function normalizeRoomCode(value){
       return String(value || "").trim().toUpperCase();
+    }
+
+    function isProtectedRoom(code){
+      return normalizeRoomCode(code) === DEVELOPER_PROTECTED_ROOM;
     }
 
     function loadGroups(){
@@ -417,6 +440,179 @@ function safeBoldInfo(s){
         const d = typeof msOrIso === "number" ? new Date(msOrIso) : new Date(msOrIso || Date.now());
         return d.toLocaleString("pt-BR");
       }catch{ return ""; }
+    }
+
+    function toDateInput(value){
+      if(!value) return "";
+      try{
+        if(/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value);
+        const d = new Date(value);
+        if(Number.isNaN(d.getTime())) return "";
+        return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+      }catch{ return ""; }
+    }
+
+    function datePlusDays(days = 0){
+      const d = new Date();
+      d.setHours(0,0,0,0);
+      d.setDate(d.getDate() + Number(days || 0));
+      return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+    }
+
+    function fmtDatePt(value){
+      const v = toDateInput(value);
+      if(!v) return "—";
+      try{
+        const [y,m,d] = v.split("-").map(Number);
+        return new Date(y, (m||1)-1, d||1).toLocaleDateString("pt-BR");
+      }catch{ return v; }
+    }
+
+    function normalizeCommercialStatus(value){
+      const v = String(value || "ativo").trim().toLowerCase();
+      return ["demo","teste","ativo","inativo","inadimplente","bloqueado"].includes(v) ? v : "ativo";
+    }
+
+    function commercialStatusLabel(value){
+      return COMMERCIAL_LABELS[normalizeCommercialStatus(value)] || "Ativo";
+    }
+
+    function commercialStatusClass(value){
+      const v = normalizeCommercialStatus(value);
+      if(v === "ativo") return "bg-green-100 text-green-700";
+      if(v === "teste") return "bg-sky-100 text-sky-700";
+      if(v === "demo") return "bg-violet-100 text-violet-700";
+      if(v === "inadimplente") return "bg-red-100 text-red-700";
+      if(v === "bloqueado") return "bg-red-100 text-red-700";
+      return "bg-gray-200 text-gray-700";
+    }
+
+    function roomRestrictionMessage(meta = state, mode = accessMode()){
+      if(mode === "developer") return "";
+      const status = normalizeCommercialStatus(meta.commercialStatus || "ativo");
+      if(status === "inadimplente") return "Esta sala está bloqueada por inadimplência. Fale com o Desenvolvedor para regularizar o acesso.";
+      if(status === "bloqueado") return "Esta sala está temporariamente bloqueada pelo Desenvolvedor.";
+      if(status === "inativo") return "Esta sala está inativa no momento.";
+      if(status === "teste"){
+        const trial = toDateInput(meta.trialEndsAt || "");
+        if(trial){
+          const endMs = new Date(`${trial}T23:59:59`).getTime();
+          if(Date.now() > endMs) return `O período de teste desta sala expirou em ${fmtDatePt(trial)}.`;
+        }
+      }
+      if(status === "ativo" && meta.paidUntil){
+        const paidUntil = toDateInput(meta.paidUntil || "");
+        if(paidUntil){
+          const endMs = new Date(`${paidUntil}T23:59:59`).getTime();
+          if(Date.now() > endMs) return `A mensalidade desta sala venceu em ${fmtDatePt(paidUntil)}. Fale com o Desenvolvedor para renovar o acesso.`;
+        }
+      }
+      return "";
+    }
+
+    function roomMetaSummary(meta = state){
+      const parts = [];
+      if(meta.ownerName) parts.push(`Cliente: ${meta.ownerName}`);
+      if(meta.ownerWhatsApp) parts.push(`WhatsApp: ${meta.ownerWhatsApp}`);
+      if(meta.trialEndsAt && normalizeCommercialStatus(meta.commercialStatus) === "teste") parts.push(`Teste até ${fmtDatePt(meta.trialEndsAt)}`);
+      if(meta.paidUntil && normalizeCommercialStatus(meta.commercialStatus) === "ativo") parts.push(`Vence em ${fmtDatePt(meta.paidUntil)}`);
+      return parts.join(" · ");
+    }
+
+    function parseDateInput(value){
+      const v = toDateInput(value);
+      if(!v) return null;
+      try{
+        const [y,m,d] = v.split("-").map(Number);
+        return new Date(y, (m||1)-1, d||1, 0, 0, 0, 0);
+      }catch{ return null; }
+    }
+
+    function daysUntilDate(value){
+      const target = parseDateInput(value);
+      if(!target) return null;
+      const today = parseDateInput(datePlusDays(0));
+      if(!today) return null;
+      const diff = target.getTime() - today.getTime();
+      return Math.floor(diff / 86400000);
+    }
+
+    function dateAddDays(baseValue, days = 0){
+      const base = parseDateInput(baseValue) || parseDateInput(datePlusDays(0));
+      if(!base) return datePlusDays(days);
+      base.setDate(base.getDate() + Number(days || 0));
+      return new Date(base.getTime() - base.getTimezoneOffset()*60000).toISOString().slice(0,10);
+    }
+
+    function dateAddMonths(baseValue, months = 1){
+      const base = parseDateInput(baseValue) || parseDateInput(datePlusDays(0));
+      if(!base) return datePlusDays(30 * Number(months || 1));
+      base.setMonth(base.getMonth() + Number(months || 1));
+      return new Date(base.getTime() - base.getTimezoneOffset()*60000).toISOString().slice(0,10);
+    }
+
+    function commercialAlertInfo(meta = state){
+      const status = normalizeCommercialStatus(meta.commercialStatus || "ativo");
+      if(status === "teste"){
+        const days = daysUntilDate(meta.trialEndsAt || "");
+        if(days == null) return null;
+        if(days < 0) return { level:"danger", kind:"trial-expired", text:`Teste expirado em ${fmtDatePt(meta.trialEndsAt)}.` };
+        if(days === 0) return { level:"warning", kind:"trial-today", text:`O teste desta sala encerra hoje (${fmtDatePt(meta.trialEndsAt)}).` };
+        if(days <= 2) return { level:"warning", kind:"trial-soon", text:`O teste desta sala vence em ${days} dia(s) (${fmtDatePt(meta.trialEndsAt)}).` };
+        return null;
+      }
+      if(status === "ativo" && meta.paidUntil){
+        const days = daysUntilDate(meta.paidUntil);
+        if(days == null) return null;
+        if(days < 0) return { level:"danger", kind:"paid-expired", text:`A mensalidade venceu em ${fmtDatePt(meta.paidUntil)}.` };
+        if(days === 0) return { level:"warning", kind:"paid-today", text:`A mensalidade desta sala vence hoje (${fmtDatePt(meta.paidUntil)}).` };
+        if(days <= 5) return { level:"warning", kind:"paid-soon", text:`A mensalidade desta sala vence em ${days} dia(s) (${fmtDatePt(meta.paidUntil)}).` };
+        return null;
+      }
+      if(status === "inadimplente") return { level:"danger", kind:"inadimplente", text:"Sala marcada como inadimplente. O acesso fica bloqueado até regularização." };
+      if(status === "bloqueado") return { level:"danger", kind:"bloqueado", text:"Sala bloqueada pelo Desenvolvedor." };
+      if(status === "inativo") return { level:"warning", kind:"inativo", text:"Sala inativa no momento." };
+      return null;
+    }
+
+    function commercialAlertBoxHtml(meta = state){
+      const alert = commercialAlertInfo(meta);
+      if(!alert) return "";
+      const styles = alert.level === "danger"
+        ? "bg-red-50 border-red-200 text-red-800"
+        : "bg-amber-50 border-amber-200 text-amber-900";
+      const devActions = session.developer ? `
+        <div class="mt-3 flex flex-wrap gap-2">
+          ${alert.kind && alert.kind.startsWith("trial") ? `<button id="btnCurrentExtendTrial" class="px-3 py-2 rounded-lg border border-sky-300 bg-white hover:bg-sky-50 text-sm font-semibold text-sky-800">Prorrogar teste +7d</button><button id="btnCurrentConvertBasic" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Converter p/ Básico</button>` : ``}
+          ${alert.kind && (alert.kind.startsWith("paid") || alert.kind === "inadimplente") ? `<button id="btnCurrentRenewMonth" class="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-sm font-semibold">Renovar +1 mês</button>` : ``}
+        </div>
+      ` : "";
+      return `<div class="mt-4 p-3 rounded-xl border ${styles}"><div class="font-semibold">Aviso comercial</div><div class="text-sm mt-1">${escapeHtml(alert.text)}</div>${devActions}</div>`;
+    }
+
+    async function maybeAutoApplyCommercialLifecycle(code, meta = {}){
+      const c = normalizeRoomCode(code);
+      if(!c || !db) return;
+      try{
+        const status = normalizeCommercialStatus(meta.commercialStatus || "ativo");
+        const patch = {};
+        if(status === "teste"){
+          const days = daysUntilDate(meta.trialEndsAt || "");
+          if(days != null && days < 0){
+            patch.commercialStatus = "inativo";
+            patch.open = false;
+          }
+        }
+        if(status === "ativo" && meta.paidUntil){
+          const days = daysUntilDate(meta.paidUntil);
+          if(days != null && days < 0){
+            patch.commercialStatus = "inadimplente";
+            patch.open = false;
+          }
+        }
+        if(!Object.keys(patch).length) return;
+        await metaUpdate(c, patch);
+      }catch{}
     }
 
 
@@ -687,7 +883,7 @@ async function ensureMeLoaded(){
     }
 
     async function saveRoomPlan(){
-      if(!session.admin) return alert("Somente admin.");
+      if(!session.developer) return alert("Somente Desenvolvedor.");
       const code = normalizeRoomCode(state.code);
       if(!code) return alert("Entre em uma sala primeiro.");
       try{
@@ -759,9 +955,16 @@ async function ensureMeLoaded(){
     function roundDoc(code, roundId){ return roundsCol(code).doc(String(roundId)); }
     function attendanceCol(code, roundId){ return roundDoc(code, roundId).collection("attendance"); }
 
-    async function ensureRoom(code){
+    async function ensureRoom(code, patch = {}){
       const c = String(code||"").toUpperCase();
-      await matchDoc(c).set({ code:c, open:true, plan:"free", updatedAt: nowIso() }, { merge:true });
+      await matchDoc(c).set(Object.assign({
+        code:c,
+        open:true,
+        plan:"free",
+        commercialStatus:"ativo",
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      }, patch || {}), { merge:true });
       await ensureActiveRound(c);
     }
 
@@ -829,6 +1032,13 @@ async function ensureMeLoaded(){
         state.team2Name = d && d.team2Name ? String(d.team2Name) : "Time 2";
         state.themeColor = d && d.themeColor ? String(d.themeColor) : "#2563eb";
         state.plan = d && d.plan ? normalizePlan(d.plan) : "free";
+        state.ownerName = d && d.ownerName ? String(d.ownerName) : "";
+        state.ownerWhatsApp = d && d.ownerWhatsApp ? String(d.ownerWhatsApp) : "";
+        state.commercialStatus = d && d.commercialStatus ? normalizeCommercialStatus(d.commercialStatus) : "ativo";
+        state.trialEndsAt = d && d.trialEndsAt ? toDateInput(d.trialEndsAt) : "";
+        state.paidUntil = d && d.paidUntil ? toDateInput(d.paidUntil) : "";
+        state.clientNotes = d && d.clientNotes ? String(d.clientNotes) : "";
+        state.adminPassStored = d && d.adminPass ? String(d.adminPass) : "";
 
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
         const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
@@ -842,6 +1052,7 @@ async function ensureMeLoaded(){
         }
 
         maybeAutoCloseSchedule();
+        maybeAutoApplyCommercialLifecycle(c, d || {});
         rememberCurrentGroup(true);
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
@@ -872,9 +1083,10 @@ async function ensureMeLoaded(){
       if(!db || !session.developer) return;
       try{
         state.developerRoomsError = "";
-        const qs = await db.collection("matches").orderBy("updatedAt","desc").limit(50).get();
+        const qs = await db.collection("matches").orderBy("updatedAt","desc").limit(200).get();
         state.developerRooms = qs.docs.map(doc => {
           const d = doc.data() || {};
+          maybeAutoApplyCommercialLifecycle(String(d.code || doc.id || ""), d || {});
           return {
             code: String(d.code || doc.id || "").toUpperCase(),
             roomName: String(d.roomName || ""),
@@ -882,7 +1094,16 @@ async function ensureMeLoaded(){
             plan: normalizePlan(d.plan || "free"),
             open: typeof d.open === "boolean" ? d.open : true,
             updatedAt: String(d.updatedAt || ""),
-            activeRoundAtMs: Number(d.activeRoundAtMs || 0)
+            createdAt: String(d.createdAt || ""),
+            activeRoundAtMs: Number(d.activeRoundAtMs || 0),
+            matchLocation: String(d.matchLocation || ""),
+            adminPass: String(d.adminPass || ""),
+            ownerName: String(d.ownerName || ""),
+            ownerWhatsApp: String(d.ownerWhatsApp || ""),
+            commercialStatus: normalizeCommercialStatus(d.commercialStatus || "ativo"),
+            trialEndsAt: toDateInput(d.trialEndsAt || ""),
+            paidUntil: toDateInput(d.paidUntil || ""),
+            clientNotes: String(d.clientNotes || "")
           };
         });
         if(force) render();
@@ -904,6 +1125,120 @@ async function ensureMeLoaded(){
       }catch(e){
         const msg = e && e.message ? e.message : String(e || "Erro ao salvar plano.");
         setSyncError(msg);
+      }
+    }
+
+
+    async function developerSetCommercialStatus(code, status){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      const safeCode = normalizeRoomCode(code);
+      const nextStatus = normalizeCommercialStatus(status || "ativo");
+      const room = (state.developerRooms || []).find(r => normalizeRoomCode(r.code) === safeCode) || {};
+      const trialInput = document.querySelector(`[data-dev-trial="${safeCode}"]`);
+      const paidInput = document.querySelector(`[data-dev-paiduntil="${safeCode}"]`);
+      const patch = { commercialStatus: nextStatus };
+      if(nextStatus === "ativo"){
+        patch.open = true;
+        patch.trialEndsAt = "";
+        patch.paidUntil = toDateInput(paidInput?.value || room.paidUntil || dateAddMonths("", 1));
+      }else if(nextStatus === "teste"){
+        patch.open = true;
+        patch.trialEndsAt = toDateInput(trialInput?.value || room.trialEndsAt || datePlusDays(7));
+      }else if(nextStatus === "demo"){
+        patch.open = true;
+      }else if(["inativo","inadimplente","bloqueado"].includes(nextStatus)){
+        patch.open = false;
+      }
+      try{
+        await metaUpdate(safeCode, patch);
+        if(normalizeRoomCode(state.code) === safeCode){
+          state.commercialStatus = patch.commercialStatus;
+          if(Object.prototype.hasOwnProperty.call(patch, 'trialEndsAt')) state.trialEndsAt = patch.trialEndsAt || "";
+          if(Object.prototype.hasOwnProperty.call(patch, 'paidUntil')) state.paidUntil = patch.paidUntil || "";
+          if(Object.prototype.hasOwnProperty.call(patch, 'open')) state.open = !!patch.open;
+        }
+        await loadDeveloperRooms(false);
+        setInfo(`Status comercial da sala ${safeCode} ajustado para ${commercialStatusLabel(nextStatus)}.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao aplicar status comercial."));
+      }
+    }
+
+    async function developerExtendTrial(code, days = 7){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      const safeCode = normalizeRoomCode(code);
+      const room = (state.developerRooms || []).find(r => normalizeRoomCode(r.code) === safeCode) || {};
+      const trialInput = document.querySelector(`[data-dev-trial="${safeCode}"]`);
+      const base = toDateInput(trialInput?.value || room.trialEndsAt || datePlusDays(0));
+      const nextTrial = dateAddDays(base, Number(days || 7));
+      try{
+        await metaUpdate(safeCode, { commercialStatus:"teste", trialEndsAt: nextTrial, open:true });
+        if(normalizeRoomCode(state.code) === safeCode){
+          state.commercialStatus = "teste";
+          state.trialEndsAt = nextTrial;
+          state.open = true;
+        }
+        await loadDeveloperRooms(false);
+        setInfo(`Teste da sala ${safeCode} prorrogado até ${fmtDatePt(nextTrial)}.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao prorrogar teste."));
+      }
+    }
+
+    async function developerRenewMonthly(code, months = 1){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      const safeCode = normalizeRoomCode(code);
+      const room = (state.developerRooms || []).find(r => normalizeRoomCode(r.code) === safeCode) || {};
+      const paidInput = document.querySelector(`[data-dev-paiduntil="${safeCode}"]`);
+      const current = toDateInput(paidInput?.value || room.paidUntil || "");
+      const base = (()=>{
+        const days = daysUntilDate(current || "");
+        if(days != null && days >= 0) return current;
+        return datePlusDays(0);
+      })();
+      const nextPaid = dateAddMonths(base, Number(months || 1));
+      try{
+        await metaUpdate(safeCode, { commercialStatus:"ativo", paidUntil: nextPaid, open:true });
+        if(normalizeRoomCode(state.code) === safeCode){
+          state.commercialStatus = "ativo";
+          state.paidUntil = nextPaid;
+          state.open = true;
+        }
+        await loadDeveloperRooms(false);
+        setInfo(`Sala ${safeCode} renovada até ${fmtDatePt(nextPaid)}.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao renovar mensalidade."));
+      }
+    }
+
+    async function developerConvertTrialToPaid(code, plan = "basico"){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      const safeCode = normalizeRoomCode(code);
+      const selectedPlan = normalizePlan(plan || "basico");
+      const nextPaid = dateAddMonths(datePlusDays(0), 1);
+      try{
+        await metaUpdate(safeCode, {
+          plan: selectedPlan,
+          commercialStatus: "ativo",
+          trialEndsAt: "",
+          paidUntil: nextPaid,
+          open: true
+        });
+        if(normalizeRoomCode(state.code) === safeCode){
+          state.plan = selectedPlan;
+          state.commercialStatus = "ativo";
+          state.trialEndsAt = "";
+          state.paidUntil = nextPaid;
+          state.open = true;
+        }
+        await loadDeveloperRooms(false);
+        setInfo(`Sala ${safeCode} convertida para ${planLabel(selectedPlan)} com vencimento em ${fmtDatePt(nextPaid)}.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao converter teste para pago."));
       }
     }
 
@@ -937,51 +1272,326 @@ async function ensureMeLoaded(){
       }
     }
 
-    function renderDeveloperRoomsPanel(){
-      if(!session.developer) return "";
+    async function developerCloseAllOpenRooms(){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      if(!confirm("Fechar todas as salas com inscrição aberta?")) return;
+      try{
+        let total = 0;
+        while(true){
+          const qs = await db.collection("matches").where("open", "==", true).limit(200).get();
+          if(qs.empty) break;
+          const batch = db.batch();
+          qs.docs.forEach(doc => {
+            batch.set(doc.ref, { open: false, updatedAt: nowIso() }, { merge: true });
+          });
+          total += qs.size;
+          await batch.commit();
+          if(qs.size < 200) break;
+        }
+        if(normalizeRoomCode(state.code)) state.open = false;
+        await loadDeveloperRooms(false);
+        setInfo(total ? `${total} sala(s) aberta(s) foram fechadas.` : "Nenhuma sala aberta encontrada.");
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao fechar as salas abertas."));
+      }
+    }
+
+    async function deleteRoomPermanently(code){
+      const c = normalizeRoomCode(code);
+      if(!c) throw new Error("Código da sala inválido.");
+      const roundsSnap = await roundsCol(c).limit(200).get();
+      for(const rd of roundsSnap.docs){
+        const rid = rd.id;
+        await deleteCollection(attendanceCol(c, rid)).catch(()=>{});
+        await roundsCol(c).doc(rid).delete().catch(()=>{});
+      }
+      await deleteCollection(playersCol(c)).catch(()=>{});
+      await deleteCollection(ratingsCol(c)).catch(()=>{});
+      await deleteCollection(snapshotsCol(c)).catch(()=>{});
+      await matchDoc(c).delete().catch(()=>{});
+      removeSavedGroup(c);
+      if(normalizeRoomCode(state.code) === c){
+        detachRoom();
+        state.code = "";
+        state.roomName = "";
+        state.roomSubtitle = "";
+        state.open = true;
+        state.plan = "free";
+        state.players = {};
+        state.attendance = {};
+        state.ratings = {};
+        state.snapshots = {};
+        state.activeRoundId = "";
+        state.activeRoundAtMs = 0;
+        state.matchDate = "";
+        state.matchTime = "";
+        state.matchLocation = "";
+        session.code = "";
+        session.playerId = "";
+        persistSession();
+        syncRoomUrl("");
+      }
+    }
+
+    async function developerDeleteRoom(code){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      const c = normalizeRoomCode(code);
+      if(isProtectedRoom(c)) return alert(`A sala ${DEVELOPER_PROTECTED_ROOM} está protegida.`);
+      if(!confirm(`Remover PERMANENTEMENTE a sala ${c}? Esta ação apaga jogadores, avaliações, rodadas e histórico.`)) return;
+      try{
+        await deleteRoomPermanently(c);
+        await loadDeveloperRooms(false);
+        setInfo(`Sala ${c} removida com sucesso.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao remover a sala."));
+      }
+    }
+
+    async function developerDeleteAllExceptProtected(){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      if(!confirm(`Remover todas as salas, exceto ${DEVELOPER_PROTECTED_ROOM}? Esta ação é permanente.`)) return;
+      try{
+        let total = 0;
+        while(true){
+          const qs = await db.collection("matches").limit(200).get();
+          if(qs.empty) break;
+          let removedThisPass = 0;
+          for(const doc of qs.docs){
+            const code = normalizeRoomCode((doc.data() || {}).code || doc.id || "");
+            if(!code || isProtectedRoom(code)) continue;
+            await deleteRoomPermanently(code);
+            total += 1;
+            removedThisPass += 1;
+          }
+          if(removedThisPass === 0) break;
+        }
+        await loadDeveloperRooms(false);
+        setInfo(total ? `${total} sala(s) foram removidas. A sala ${DEVELOPER_PROTECTED_ROOM} foi preservada.` : "Nenhuma sala foi removida.");
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao remover salas."));
+      }
+    }
+
+
+    function developerSetFilter(value){
+      state.developerFilter = String(value || "").trim().toLowerCase();
+      render();
+    }
+
+    function filteredDeveloperRooms(){
       const rooms = Array.isArray(state.developerRooms) ? state.developerRooms : [];
-      return `
-        <div class="mt-5 rounded-2xl border bg-amber-50 p-4">
-          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <h3 class="font-bold text-gray-800">Painel do Desenvolvedor</h3>
-              <p class="text-xs text-gray-600">Visão global das salas, planos e atalhos de suporte.</p>
-            </div>
-            <button id="btnDevRefresh" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar lista</button>
-          </div>
-          ${state.developerRoomsError ? `<div class="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${escapeHtml(state.developerRoomsError)}</div>` : ``}
-          <div class="mt-3 space-y-3 max-h-[420px] overflow-y-auto pr-1">
-            ${rooms.length ? rooms.map(room => `
-              <div class="rounded-xl border bg-white p-3">
-                <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                  <div>
-                    <div class="font-semibold text-gray-800">${escapeHtml(room.roomName || ('Sala ' + room.code))}</div>
-                    <div class="text-xs text-gray-500">Código ${escapeHtml(room.code)}${room.roomSubtitle ? ' · ' + escapeHtml(room.roomSubtitle) : ''}</div>
-                    <div class="mt-2 flex flex-wrap gap-2">
-                      <span class="text-[11px] px-2 py-1 rounded-full ${room.open ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${room.open ? 'Inscrição aberta' : 'Inscrição fechada'}</span>
-                      <span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planLabel(room.plan))}</span>
-                    </div>
-                  </div>
-                  <div class="flex flex-wrap gap-2">
-                    <button data-dev-open="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir sala</button>
-                    <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">${room.open ? 'Fechar sala' : 'Abrir inscrições'}</button>
-                    <button data-dev-reset="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-red-50 text-sm font-semibold">Resetar</button>
-                  </div>
-                </div>
-                <div class="mt-3 flex flex-col sm:flex-row gap-2">
-                  <select data-dev-plan-select="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border flex-1">
-                    <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
-                    <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
-                    <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
-                  </select>
-                  <button data-dev-saveplan="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-semibold">Salvar plano</button>
-                </div>
-              </div>
-            `).join('') : `<div class="rounded-xl border bg-white p-3 text-sm text-gray-500">Nenhuma sala encontrada ainda.</div>`}
+      const q = String(state.developerFilter || "").trim().toLowerCase();
+      if(!q) return rooms;
+      return rooms.filter(room => {
+        const hay = [room.code, room.roomName, room.roomSubtitle, room.matchLocation, planLabel(room.plan), commercialStatusLabel(room.commercialStatus), room.ownerName, room.ownerWhatsApp].join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    async function developerQuickSaveMeta(code){
+      if(!session.developer) return alert("Somente Desenvolvedor.");
+      const safeCode = String(code || "").toUpperCase();
+      const roomName = String(document.querySelector(`[data-dev-name="${safeCode}"]`)?.value || "").trim();
+      const roomSubtitle = String(document.querySelector(`[data-dev-subtitle="${safeCode}"]`)?.value || "").trim();
+      const matchLocation = String(document.querySelector(`[data-dev-location="${safeCode}"]`)?.value || "").trim();
+      const adminPass = String(document.querySelector(`[data-dev-adminpass="${safeCode}"]`)?.value || "").trim();
+      const ownerName = String(document.querySelector(`[data-dev-owner="${safeCode}"]`)?.value || "").trim();
+      const ownerWhatsApp = String(document.querySelector(`[data-dev-whats="${safeCode}"]`)?.value || "").trim();
+      const commercialStatus = normalizeCommercialStatus(document.querySelector(`[data-dev-status="${safeCode}"]`)?.value || "ativo");
+      const trialEndsAt = toDateInput(document.querySelector(`[data-dev-trial="${safeCode}"]`)?.value || "");
+      const paidUntil = toDateInput(document.querySelector(`[data-dev-paiduntil="${safeCode}"]`)?.value || "");
+      const clientNotes = String(document.querySelector(`[data-dev-notes="${safeCode}"]`)?.value || "").trim();
+      const patch = {
+        roomName: roomName || `Sala ${safeCode}`,
+        roomSubtitle,
+        matchLocation,
+        ownerName,
+        ownerWhatsApp,
+        commercialStatus,
+        trialEndsAt,
+        paidUntil,
+        clientNotes,
+        updatedAt: nowIso()
+      };
+      if(adminPass) patch.adminPass = adminPass;
+      try{
+        await metaUpdate(safeCode, patch);
+        await loadDeveloperRooms(false);
+        if(normalizeRoomCode(state.code) === safeCode){
+          if(roomName) state.roomName = roomName;
+          state.roomSubtitle = roomSubtitle;
+          state.matchLocation = matchLocation;
+          state.ownerName = ownerName;
+          state.ownerWhatsApp = ownerWhatsApp;
+          state.commercialStatus = commercialStatus;
+          state.trialEndsAt = trialEndsAt;
+          state.paidUntil = paidUntil;
+          state.clientNotes = clientNotes;
+          if(adminPass) state.adminPassStored = adminPass;
+        }
+        setInfo(`Dados da sala ${safeCode} salvos.`);
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao salvar dados da sala."));
+      }
+    }
+
+    async function developerCopyAdminAccess(code){
+      const safeCode = String(code || "").toUpperCase();
+      const room = (state.developerRooms || []).find(r => String(r.code || "").toUpperCase() === safeCode) || {};
+      const adminPass = String(room.adminPass || ADMIN_PASS || "").trim();
+      const lines = [
+        `Acesso Admin · Manchette Volleyball`,
+        `Sala: ${safeCode}`,
+        `Link: ${buildRoomUrl(safeCode)}`,
+        `Senha admin: ${adminPass}`
+      ];
+      if(room.roomName) lines.splice(1, 0, `Grupo: ${room.roomName}`);
+      await copyToClipboard(lines.join("\n"));
+      setInfo(`Dados de acesso admin da sala ${safeCode} copiados.`);
+    }
+
+
+function renderDeveloperRoomsPanel(){
+  if(!session.developer) return "";
+  const allRooms = Array.isArray(state.developerRooms) ? state.developerRooms : [];
+  const rooms = filteredDeveloperRooms();
+  const openCount = allRooms.filter(room => room.open).length;
+  const protectedCount = allRooms.filter(room => isProtectedRoom(room.code)).length;
+  const freeCount = allRooms.filter(room => normalizePlan(room.plan) === "free").length;
+  const basicoCount = allRooms.filter(room => normalizePlan(room.plan) === "basico").length;
+  const proCount = allRooms.filter(room => normalizePlan(room.plan) === "pro").length;
+  const testeCount = allRooms.filter(room => normalizeCommercialStatus(room.commercialStatus) === "teste").length;
+  const ativoCount = allRooms.filter(room => normalizeCommercialStatus(room.commercialStatus) === "ativo").length;
+  const inadCount = allRooms.filter(room => normalizeCommercialStatus(room.commercialStatus) === "inadimplente").length;
+  const inativoCount = allRooms.filter(room => ["inativo","bloqueado"].includes(normalizeCommercialStatus(room.commercialStatus))).length;
+  const dueSoonCount = allRooms.filter(room => {
+    const alert = commercialAlertInfo(room);
+    return !!alert && alert.level === "warning";
+  }).length;
+  const overdueCount = allRooms.filter(room => {
+    const alert = commercialAlertInfo(room);
+    return !!alert && alert.level === "danger";
+  }).length;
+  const q = escapeHtml(state.developerFilter || "");
+  return `
+    <div class="mt-5 rounded-2xl border bg-amber-50 p-4">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h3 class="font-bold text-gray-800">Painel do Desenvolvedor</h3>
+          <p class="text-xs text-gray-600">Gestão técnica e comercial: salas, planos, teste grátis, vencimento, inadimplência e suporte.</p>
+          <div class="mt-2 flex flex-wrap gap-2 text-[11px]">
+            <span class="px-2 py-1 rounded-full bg-white border text-gray-700">Salas ${allRooms.length}</span>
+            <span class="px-2 py-1 rounded-full bg-green-100 text-green-700">Abertas ${openCount}</span>
+            <span class="px-2 py-1 rounded-full bg-sky-100 text-sky-700">Teste ${testeCount}</span>
+            <span class="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">Ativas ${ativoCount}</span>
+            <span class="px-2 py-1 rounded-full bg-red-100 text-red-700">Inadimplentes ${inadCount}</span>
+            <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800">Vencendo ${dueSoonCount}</span>
+            <span class="px-2 py-1 rounded-full bg-rose-100 text-rose-700">Vencidas ${overdueCount}</span>
+            <span class="px-2 py-1 rounded-full bg-gray-200 text-gray-700">Inativas ${inativoCount}</span>
+            <span class="px-2 py-1 rounded-full bg-slate-100 text-slate-700">Free ${freeCount}</span>
+            <span class="px-2 py-1 rounded-full bg-blue-100 text-blue-700">Básico ${basicoCount}</span>
+            <span class="px-2 py-1 rounded-full bg-violet-100 text-violet-700">PRO ${proCount}</span>
+            <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800">Protegidas ${protectedCount}</span>
           </div>
         </div>
-      `;
-    }
+        <div class="flex flex-wrap gap-2">
+          <button id="btnCreateTrialRoom" class="px-3 py-2 rounded-lg bg-sky-600 text-white hover:bg-sky-700 text-sm font-semibold">Criar teste grátis</button>
+          <button id="btnDevCloseAllOpen" class="px-3 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-sm font-semibold">Fechar todas abertas</button>
+          <button id="btnDevDeleteExceptProtected" class="px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 text-sm font-semibold">Remover todas exceto protegida</button>
+          <button id="btnDevRefresh" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar lista</button>
+        </div>
+      </div>
+      <div class="mt-3 grid gap-3 lg:grid-cols-[1.2fr_.8fr]">
+        <div class="rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-amber-900">
+          A sala protegida <b>${escapeHtml(DEVELOPER_PROTECTED_ROOM)}</b> não pode ser removida pelo painel. Use-a como sala demo principal do sistema.
+        </div>
+        <div class="rounded-xl border border-amber-200 bg-white px-3 py-2">
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Busca rápida</div>
+          <input id="devRoomFilter" value="${q}" placeholder="Buscar por código, nome, cliente, WhatsApp, status, local ou plano" class="mt-2 w-full px-3 py-2 rounded-lg border text-sm" />
+        </div>
+      </div>
+      ${state.developerRoomsError ? `<div class="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${escapeHtml(state.developerRoomsError)}</div>` : ``}
+      <div class="mt-3 space-y-3 max-h-[620px] overflow-y-auto pr-1">
+        ${rooms.length ? rooms.map(room => {
+          const protectedRoom = isProtectedRoom(room.code);
+          const statusClass = commercialStatusClass(room.commercialStatus);
+          const summary = roomMetaSummary(room);
+          const roomAlert = commercialAlertInfo(room);
+          const waLink = room.ownerWhatsApp ? `https://wa.me/${String(room.ownerWhatsApp).replace(/\D+/g,'')}` : '#';
+          return `
+          <div class="rounded-xl border bg-white p-3">
+            <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+              <div>
+                <div class="font-semibold text-gray-800">${escapeHtml(room.roomName || ('Sala ' + room.code))}</div>
+                <div class="text-xs text-gray-500">Código ${escapeHtml(room.code)}${room.roomSubtitle ? ' · ' + escapeHtml(room.roomSubtitle) : ''}${room.matchLocation ? ' · ' + escapeHtml(room.matchLocation) : ''}</div>
+                ${summary ? `<div class="mt-1 text-xs text-gray-500">${escapeHtml(summary)}</div>` : ``}
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <span class="text-[11px] px-2 py-1 rounded-full ${room.open ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${room.open ? 'Inscrição aberta' : 'Inscrição fechada'}</span>
+                  <span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planLabel(room.plan))}</span>
+                  <span class="text-[11px] px-2 py-1 rounded-full ${statusClass}">${escapeHtml(commercialStatusLabel(room.commercialStatus))}</span>
+                  ${roomAlert ? `<span class="text-[11px] px-2 py-1 rounded-full ${roomAlert.level === 'danger' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-800'}">${roomAlert.level === 'danger' ? 'Atenção vencida' : 'Atenção vencendo'}</span>` : ``}
+                  ${protectedRoom ? `<span class="text-[11px] px-2 py-1 rounded-full bg-amber-100 text-amber-800">Sala protegida</span>` : ``}
+                </div>
+                ${roomAlert ? `<div class="mt-2 rounded-lg border ${roomAlert.level === 'danger' ? 'border-red-200 bg-red-50 text-red-700' : 'border-amber-200 bg-amber-50 text-amber-800'} px-3 py-2 text-xs font-medium">${escapeHtml(roomAlert.text)}</div>` : ``}
+              </div>
+              <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <button data-dev-open="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir sala</button>
+                <button data-dev-copylink="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar link</button>
+                <button data-dev-copyaccess="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar acesso admin</button>
+                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">${room.open ? 'Fechar sala' : 'Abrir inscrições'}</button>
+                <button data-dev-reset="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-red-50 text-sm font-semibold">Resetar</button>
+                <button data-dev-remove="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg ${protectedRoom ? 'border bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-red-600 text-white hover:bg-red-700'} text-sm font-semibold" ${protectedRoom ? 'disabled' : ''}>Remover sala</button>
+              </div>
+            </div>
+            <div class="mt-3 grid gap-2 md:grid-cols-3">
+              <input data-dev-name="${escapeHtml(room.code)}" value="${escapeHtml(room.roomName || '')}" placeholder="Nome da sala" class="px-3 py-2 rounded-lg border text-sm" />
+              <input data-dev-subtitle="${escapeHtml(room.code)}" value="${escapeHtml(room.roomSubtitle || '')}" placeholder="Subtítulo / grupo / cliente" class="px-3 py-2 rounded-lg border text-sm" />
+              <input data-dev-location="${escapeHtml(room.code)}" value="${escapeHtml(room.matchLocation || '')}" placeholder="Local principal" class="px-3 py-2 rounded-lg border text-sm" />
+            </div>
+            <div class="mt-2 grid gap-2 md:grid-cols-3">
+              <input data-dev-owner="${escapeHtml(room.code)}" value="${escapeHtml(room.ownerName || '')}" placeholder="Responsável / cliente" class="px-3 py-2 rounded-lg border text-sm" />
+              <input data-dev-whats="${escapeHtml(room.code)}" value="${escapeHtml(room.ownerWhatsApp || '')}" placeholder="WhatsApp do cliente" class="px-3 py-2 rounded-lg border text-sm" />
+              <input data-dev-adminpass="${escapeHtml(room.code)}" placeholder="Nova senha admin (deixe em branco para manter)" class="px-3 py-2 rounded-lg border text-sm" />
+            </div>
+            <div class="mt-2 grid gap-2 md:grid-cols-4">
+              <select data-dev-status="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border text-sm">
+                <option value="teste" ${normalizeCommercialStatus(room.commercialStatus)==='teste' ? 'selected' : ''}>Teste</option>
+                <option value="ativo" ${normalizeCommercialStatus(room.commercialStatus)==='ativo' ? 'selected' : ''}>Ativo</option>
+                <option value="inativo" ${normalizeCommercialStatus(room.commercialStatus)==='inativo' ? 'selected' : ''}>Inativo</option>
+                <option value="inadimplente" ${normalizeCommercialStatus(room.commercialStatus)==='inadimplente' ? 'selected' : ''}>Inadimplente</option>
+                <option value="bloqueado" ${normalizeCommercialStatus(room.commercialStatus)==='bloqueado' ? 'selected' : ''}>Bloqueado</option>
+                <option value="demo" ${normalizeCommercialStatus(room.commercialStatus)==='demo' ? 'selected' : ''}>Demonstração</option>
+              </select>
+              <input data-dev-trial="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.trialEndsAt || ''))}" class="px-3 py-2 rounded-lg border text-sm" />
+              <input data-dev-paiduntil="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.paidUntil || ''))}" class="px-3 py-2 rounded-lg border text-sm" />
+              <select data-dev-plan-select="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border text-sm">
+                <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
+                <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
+                <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
+              </select>
+            </div>
+            <textarea data-dev-notes="${escapeHtml(room.code)}" placeholder="Observações do cliente, vendas, vencimento, suporte..." class="mt-2 w-full px-3 py-2 rounded-lg border text-sm min-h-[84px]">${escapeHtml(room.clientNotes || '')}</textarea>
+            <div class="mt-2 grid gap-2 lg:grid-cols-2 xl:grid-cols-4">
+              <button data-dev-savemeta="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Salvar dados</button>
+              <button data-dev-saveplan="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-semibold">Salvar plano</button>
+              <button data-dev-convert-basic="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Converter p/ Básico</button>
+              <button data-dev-convert-pro="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-violet-600 text-white hover:bg-violet-700 text-sm font-semibold">Converter p/ PRO</button>
+              <button data-dev-extendtrial="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-sky-50 text-sm font-semibold">Prorrogar teste +7d</button>
+              <button data-dev-renewmonth="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-sm font-semibold">Renovar +1 mês</button>
+              <button data-dev-statusapply="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Aplicar status</button>
+              <a href="${waLink}" ${room.ownerWhatsApp ? 'target="_blank" rel="noopener noreferrer"' : ''} class="px-3 py-2 rounded-lg border hover:bg-green-50 text-sm font-semibold text-center ${room.ownerWhatsApp ? '' : 'opacity-50 pointer-events-none'}">WhatsApp cliente</a>
+              <button data-dev-copyclient="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar resumo</button>
+            </div>
+          </div>
+        `}).join('') : `<div class="rounded-xl border bg-white p-3 text-sm text-gray-500">Nenhuma sala encontrada ainda.</div>`}
+      </div>
+    </div>
+  `;
+}
 
     async function setPlayer(code, player){
       const c = String(code||"").toUpperCase();
@@ -1068,7 +1678,8 @@ async function ensureMeLoaded(){
       try{
         if(!canCreateRooms()) return alert("A criação de salas fica disponível para Admin ou Desenvolvedor.");
         const code = genCode(6);
-        await ensureRoom(code);
+        const patch = { adminPass: session.developer ? (ADMIN_PASS || "admin123") : String(session.adminPassDraft || ADMIN_PASS || "admin123") };
+        await ensureRoom(code, patch);
         state.code = code;
         session.code = code;
         session.playerId = "";
@@ -1081,10 +1692,78 @@ async function ensureMeLoaded(){
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
+    async function createFreeTrialRoom(){
+      try{
+        const ownerName = String(prompt("Nome do responsável pelo teste grátis:", "") || "").trim();
+        if(!ownerName) return;
+        const ownerWhatsApp = String(prompt("WhatsApp do responsável:", "") || "").trim();
+        const roomName = String(prompt("Nome do grupo / quadra:", `Teste de ${ownerName}`) || `Teste de ${ownerName}`).trim();
+        const code = genCode(6);
+        const generatedAdminPass = genPlayerCode(8);
+        const trialUntil = datePlusDays(7);
+        await ensureRoom(code, {
+          roomName,
+          roomSubtitle: ownerName,
+          ownerName,
+          ownerWhatsApp,
+          adminPass: generatedAdminPass,
+          plan: "free",
+          commercialStatus: "teste",
+          trialEndsAt: trialUntil,
+          clientNotes: "Teste grátis criado pelo fluxo inicial.",
+          open: true
+        });
+        session.adminPassDraft = generatedAdminPass;
+        setAccessMode("admin");
+        state.code = code;
+        session.code = code;
+        session.playerId = "";
+        persistSession();
+        syncRoomUrl(code);
+        attachRoom(code);
+        rememberCurrentGroup(true);
+        const lines = [
+          `Teste grátis · Manchette Volleyball`,
+          `Sala: ${code}`,
+          `Grupo: ${roomName}`,
+          `Link: ${buildRoomUrl(code)}`,
+          `Senha admin: ${generatedAdminPass}`,
+          `Teste até: ${fmtDatePt(trialUntil)}`
+        ];
+        try{ await copyToClipboard(lines.join("\n")); }catch{}
+        alert(`Teste grátis criado.\n\nSala: ${code}\nSenha admin: ${generatedAdminPass}\n\nOs dados foram copiados para facilitar o envio ao cliente.`);
+        setInfo("Teste grátis criado. Use esta mesma sala para fazer upgrade depois para Básico ou PRO.");
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
+    function openDemoRoom(){
+      setAccessMode("player");
+      joinRoomByCode(DEVELOPER_PROTECTED_ROOM);
+    }
+
     async function joinRoomByCode(rawCode){
       try{
         const code = normalizeRoomCode(rawCode);
         if(!code) return;
+        const mode = accessMode();
+        const snap = await matchDoc(code).get();
+        if(!snap.exists){
+          if(mode === "developer" || mode === "admin"){
+            alert("Sala não encontrada. Use 'Criar nova' para abrir uma sala nova ou confirme o código informado.");
+          }else{
+            alert("Sala não encontrada. Verifique o código enviado pelo organizador.");
+          }
+          return;
+        }
+        const data = snap.data() || {};
+        if(mode === "admin" && !session.developer){
+          const typedPass = String(session.adminPassDraft || "").trim();
+          const expectedPass = String(data.adminPass || ADMIN_PASS || "").trim();
+          if(!typedPass || typedPass !== expectedPass) return alert("Senha admin inválida para esta sala.");
+        }
+        const restriction = roomRestrictionMessage(data, mode);
+        if(restriction) return alert(restriction);
+
         const prevCode = normalizeRoomCode(session.code);
         state.code = code;
         session.code = code;
@@ -1095,10 +1774,8 @@ async function ensureMeLoaded(){
         }
         persistSession();
         syncRoomUrl(code);
-        await ensureRoom(code);
         attachRoom(code);
         rememberCurrentGroup(true);
-        const mode = accessMode();
         const entryMsg = mode === "developer"
           ? "<b>Entrou na sala como Desenvolvedor.</b> Você tem visão e controle avançado desta sala."
           : mode === "admin"
@@ -1387,10 +2064,12 @@ async function markPresence(present){
     // ===============================
     function adminLogin(){
       const pass = ($("homeAdminPass")?.value || "").trim();
-      if(pass !== ADMIN_PASS) return alert("Senha admin inválida.");
+      if(!pass) return alert("Digite a senha admin da sala.");
+      session.adminPassDraft = pass;
+      persistSession();
       setAccessMode("admin");
       if($("homeAdminPass")) $("homeAdminPass").value = "";
-      setInfo("Modo Admin ativado.");
+      setInfo("Modo Admin ativado. Agora digite o código da sala e entre.");
     }
 
     function developerLogin(){
@@ -1409,6 +2088,7 @@ async function markPresence(present){
     function adminLogout(){
       session.playerId = "";
       session.prevPlayerId = "";
+      session.adminPassDraft = "";
       setAccessMode("player");
       setInfo("Você voltou ao modo Jogador.");
     }
@@ -2056,6 +2736,8 @@ function openWhatsApp(text, numberDigits){
       const dashboardStats = computeDashboardStats(playersArr, presentPlayers, waiting, team1, team2, byTarget);
       const historyData = snapshotsArray();
       const historyVisible = canUseHistory ? historyData.slice(0, plan === "basico" ? 5 : 10) : [];
+      const commercialSummary = roomMetaSummary(state);
+      const commercialAlertHtml = commercialAlertBoxHtml(state);
 
       const openBadge = state.open
         ? `<span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">INSCRIÇÃO ABERTA</span>`
@@ -2075,7 +2757,8 @@ function openWhatsApp(text, numberDigits){
                   <div>⌛ Faltam <b>${escapeHtml(countdownLabel)}</b></div>
                 </div>
               ` : ``}
-              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planName)}</span>${accessBadgeHtml()}</div>
+              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planName)}</span><span class="text-xs px-2 py-1 rounded-full ${commercialStatusClass(state.commercialStatus)}">${escapeHtml(commercialStatusLabel(state.commercialStatus))}</span>${accessBadgeHtml()}</div>
+              ${commercialSummary ? `<div class="mt-2 text-xs text-gray-500">${escapeHtml(commercialSummary)}</div>` : ``}
             </div>
 
             <div class="flex flex-wrap gap-2 items-center">
@@ -2095,6 +2778,8 @@ function openWhatsApp(text, numberDigits){
               ${safeBoldInfo(state.info)}
             </div>
           ` : ``}
+
+          ${commercialAlertHtml}
 
           ${state.syncError ? `
             <div class="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">
@@ -2369,6 +3054,7 @@ function openWhatsApp(text, numberDigits){
                     <div class="text-xs text-gray-500 mt-2">
                       <b>Nova rodada</b>: todo mundo volta a <b>Ausente</b> e confirma presença novamente. <b>Resetar</b> zera tudo.
                     </div>
+                    ${session.developer ? `
                     <div class="mt-3 rounded-xl border p-3 bg-gray-50">
                       <div class="text-sm font-semibold">Plano da sala</div>
                       <div class="mt-2 flex flex-col sm:flex-row gap-2">
@@ -2379,8 +3065,9 @@ function openWhatsApp(text, numberDigits){
                         </select>
                         <button id="btnSavePlan" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">Salvar plano</button>
                       </div>
-                      <div class="mt-2 text-xs text-gray-500">Use isso para ativar o plano do cliente sem precisar de outro app.</div>
+                      <div class="mt-2 text-xs text-gray-500">Somente o Desenvolvedor pode alterar o plano da sala.</div>
                     </div>
+                    ` : `<div class="mt-3 rounded-xl border p-3 bg-gray-50"><div class="text-sm font-semibold">Plano da sala</div><div class="mt-2 text-xs text-gray-500">Plano atual: <b>${escapeHtml(planName)}</b>. Somente o Desenvolvedor pode alterar.</div></div>`}
                     <div class="mt-3 rounded-xl border p-3 bg-gray-50">
                       <div class="text-sm font-semibold">Horário da partida</div>
                       <div class="mt-2 grid gap-2 sm:grid-cols-2">
@@ -2660,7 +3347,8 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnWAReport")) $("btnWAReport").onclick = ()=> whatsManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnDownloadReport")) $("btnDownloadReport").onclick = ()=> downloadManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnSavePersonalization")) $("btnSavePersonalization").onclick = ()=> savePersonalization();
-        if($("btnSavePlan")) $("btnSavePlan").onclick = ()=> saveRoomPlan();
+        if($("btnSavePlan") && session.developer) $("btnSavePlan").onclick = ()=> saveRoomPlan();
+        if($("btnDevCloseAllOpen")) $("btnDevCloseAllOpen").onclick = ()=> developerCloseAllOpenRooms();
         if($("btnCopyRoomLink")) $("btnCopyRoomLink").onclick = ()=> copyToClipboard(buildRoomUrl(code));
 
         document.querySelectorAll("[data-open-group]").forEach(btn=>{
@@ -2678,10 +3366,31 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         });
 
         if($("btnDevRefresh")) $("btnDevRefresh").onclick = ()=> loadDeveloperRooms(true);
+        if($("btnCreateTrialRoom")) $("btnCreateTrialRoom").onclick = ()=> createFreeTrialRoom();
+        if($("btnDevDeleteExceptProtected")) $("btnDevDeleteExceptProtected").onclick = ()=> developerDeleteAllExceptProtected();
+        if($("devRoomFilter")) $("devRoomFilter").oninput = (e)=> developerSetFilter(e.target.value);
         document.querySelectorAll("[data-dev-open]").forEach(btn=>{
           btn.addEventListener("click", ()=>{
             const roomCode = btn.getAttribute("data-dev-open");
             openDeveloperRoom(roomCode);
+          });
+        });
+        document.querySelectorAll("[data-dev-copylink]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-copylink");
+            copyToClipboard(buildRoomUrl(roomCode));
+          });
+        });
+        document.querySelectorAll("[data-dev-copyaccess]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-copyaccess");
+            developerCopyAdminAccess(roomCode);
+          });
+        });
+        document.querySelectorAll("[data-dev-savemeta]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-savemeta");
+            developerQuickSaveMeta(roomCode);
           });
         });
         document.querySelectorAll("[data-dev-saveplan]").forEach(btn=>{
@@ -2691,10 +3400,55 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
             developerQuickSavePlan(roomCode, select ? select.value : "free");
           });
         });
+        document.querySelectorAll("[data-dev-convert-basic]").forEach(btn=>{
+          btn.onclick = ()=> developerConvertTrialToPaid(btn.getAttribute("data-dev-convert-basic"), "basico");
+        });
+        document.querySelectorAll("[data-dev-convert-pro]").forEach(btn=>{
+          btn.onclick = ()=> developerConvertTrialToPaid(btn.getAttribute("data-dev-convert-pro"), "pro");
+        });
+        document.querySelectorAll("[data-dev-extendtrial]").forEach(btn=>{
+          btn.onclick = ()=> developerExtendTrial(btn.getAttribute("data-dev-extendtrial"), 7);
+        });
+        document.querySelectorAll("[data-dev-renewmonth]").forEach(btn=>{
+          btn.onclick = ()=> developerRenewMonthly(btn.getAttribute("data-dev-renewmonth"), 1);
+        });
+        document.querySelectorAll("[data-dev-statusapply]").forEach(btn=>{
+          btn.onclick = ()=> {
+            const roomCode = btn.getAttribute("data-dev-statusapply");
+            const select = document.querySelector(`[data-dev-status="${roomCode}"]`);
+            developerSetCommercialStatus(roomCode, select ? select.value : "ativo");
+          };
+        });
+        document.querySelectorAll("[data-dev-copyclient]").forEach(btn=>{
+          btn.onclick = async ()=> {
+            const roomCode = btn.getAttribute("data-dev-copyclient");
+            const room = (state.developerRooms || []).find(r => normalizeRoomCode(r.code) === normalizeRoomCode(roomCode)) || {};
+            const lines = [
+              `Resumo comercial · Manchette Volleyball`,
+              `Sala: ${room.code || roomCode}`,
+              room.roomName ? `Grupo: ${room.roomName}` : "",
+              room.ownerName ? `Cliente: ${room.ownerName}` : "",
+              room.ownerWhatsApp ? `WhatsApp: ${room.ownerWhatsApp}` : "",
+              `Plano: ${planLabel(room.plan || 'free')}`,
+              `Status: ${commercialStatusLabel(room.commercialStatus || 'ativo')}`,
+              room.trialEndsAt ? `Teste até: ${fmtDatePt(room.trialEndsAt)}` : "",
+              room.paidUntil ? `Vence em: ${fmtDatePt(room.paidUntil)}` : "",
+              room.clientNotes ? `Obs.: ${room.clientNotes}` : ""
+            ].filter(Boolean);
+            await copyToClipboard(lines.join("\n"));
+            setInfo(`Resumo da sala ${roomCode} copiado.`);
+          };
+        });
         document.querySelectorAll("[data-dev-reset]").forEach(btn=>{
           btn.addEventListener("click", ()=>{
             const roomCode = btn.getAttribute("data-dev-reset");
             developerResetRoom(roomCode);
+          });
+        });
+        document.querySelectorAll("[data-dev-remove]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-remove");
+            developerDeleteRoom(roomCode);
           });
         });
         document.querySelectorAll("[data-dev-toggle]").forEach(btn=>{
@@ -2708,8 +3462,14 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnAccessPlayer")) $("btnAccessPlayer").onclick = ()=> playerLogin();
         if($("btnAccessAdmin")) $("btnAccessAdmin").onclick = ()=> adminLogin();
         if($("btnAccessDeveloper")) $("btnAccessDeveloper").onclick = ()=> developerLogin();
+        if($("btnOpenDemo")) $("btnOpenDemo").onclick = ()=> openDemoRoom();
+        if($("btnOpenDemo2")) $("btnOpenDemo2").onclick = ()=> openDemoRoom();
+        if($("btnStartFreeTrial")) $("btnStartFreeTrial").onclick = ()=> createFreeTrialRoom();
         if($("btnAccessLogout")) $("btnAccessLogout").onclick = ()=> adminLogout();
         if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
+        if($("btnCurrentExtendTrial")) $("btnCurrentExtendTrial").onclick = ()=> developerExtendTrial(code, 7);
+        if($("btnCurrentConvertBasic")) $("btnCurrentConvertBasic").onclick = ()=> developerConvertTrialToPaid(code, "basico");
+        if($("btnCurrentRenewMonth")) $("btnCurrentRenewMonth").onclick = ()=> developerRenewMonthly(code, 1);
         if($("btnSaveSchedule")) $("btnSaveSchedule").onclick = ()=> saveMatchSchedule();
         if($("btnClearSchedule")) $("btnClearSchedule").onclick = ()=> clearMatchSchedule();
 
