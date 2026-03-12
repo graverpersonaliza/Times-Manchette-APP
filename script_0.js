@@ -519,6 +519,16 @@ function safeBoldInfo(s){
       return parts.join(" · ");
     }
 
+    function roomIsOrphan(meta = {}){
+      const noOwner = !String(meta.ownerName || '').trim() && !String(meta.ownerWhatsApp || '').trim();
+      const noSubtitle = !String(meta.roomSubtitle || '').trim();
+      const noLocation = !String(meta.matchLocation || '').trim();
+      const defaultName = !String(meta.roomName || '').trim() || String(meta.roomName || '').trim() === `Sala ${String(meta.code || '').toUpperCase()}`;
+      const noCommercialDates = !String(meta.trialEndsAt || '').trim() && !String(meta.paidUntil || '').trim();
+      const noRecentRound = !Number(meta.activeRoundAtMs || 0);
+      return noOwner && noSubtitle && noLocation && defaultName && noCommercialDates && noRecentRound;
+    }
+
     function parseDateInput(value){
       const v = toDateInput(value);
       if(!v) return null;
@@ -1103,9 +1113,11 @@ async function ensureMeLoaded(){
             commercialStatus: normalizeCommercialStatus(d.commercialStatus || "ativo"),
             trialEndsAt: toDateInput(d.trialEndsAt || ""),
             paidUntil: toDateInput(d.paidUntil || ""),
-            clientNotes: String(d.clientNotes || "")
+            clientNotes: String(d.clientNotes || ""),
+            archived: !!d.archived,
+            archivedAt: String(d.archivedAt || "")
           };
-        });
+        }).filter(room => !room.archived);
         if(force) render();
       }catch(e){
         state.developerRoomsError = e && e.message ? e.message : String(e || "Erro ao carregar salas");
@@ -1338,11 +1350,13 @@ async function ensureMeLoaded(){
       if(!session.developer) return alert("Somente Desenvolvedor.");
       const c = normalizeRoomCode(code);
       if(isProtectedRoom(c)) return alert(`A sala ${DEVELOPER_PROTECTED_ROOM} está protegida.`);
-      if(!confirm(`Remover PERMANENTEMENTE a sala ${c}? Esta ação apaga jogadores, avaliações, rodadas e histórico.`)) return;
+      if(!confirm(`Remover a sala ${c} da lista do painel?`)) return;
       try{
-        await deleteRoomPermanently(c);
+        await metaUpdate(c, { archived: true, archivedAt: nowIso(), open: false, commercialStatus: "bloqueado" });
+        removeSavedGroup(c);
+        if(normalizeRoomCode(state.code) === c) leaveRoom();
         await loadDeveloperRooms(false);
-        setInfo(`Sala ${c} removida com sucesso.`);
+        setInfo(`Sala ${c} removida da lista.`);
         render();
       }catch(e){
         setSyncError(e && e.message ? e.message : String(e || "Erro ao remover a sala."));
@@ -1351,24 +1365,20 @@ async function ensureMeLoaded(){
 
     async function developerDeleteAllExceptProtected(){
       if(!session.developer) return alert("Somente Desenvolvedor.");
-      if(!confirm(`Remover todas as salas, exceto ${DEVELOPER_PROTECTED_ROOM}? Esta ação é permanente.`)) return;
+      if(!confirm(`Remover do painel todas as salas, exceto ${DEVELOPER_PROTECTED_ROOM}?`)) return;
       try{
+        const qs = await db.collection("matches").limit(200).get();
         let total = 0;
-        while(true){
-          const qs = await db.collection("matches").limit(200).get();
-          if(qs.empty) break;
-          let removedThisPass = 0;
-          for(const doc of qs.docs){
-            const code = normalizeRoomCode((doc.data() || {}).code || doc.id || "");
-            if(!code || isProtectedRoom(code)) continue;
-            await deleteRoomPermanently(code);
-            total += 1;
-            removedThisPass += 1;
-          }
-          if(removedThisPass === 0) break;
+        for(const doc of qs.docs){
+          const code = normalizeRoomCode((doc.data() || {}).code || doc.id || "");
+          if(!code || isProtectedRoom(code)) continue;
+          await metaUpdate(code, { archived: true, archivedAt: nowIso(), open: false, commercialStatus: "bloqueado" });
+          removeSavedGroup(code);
+          total += 1;
         }
+        if(normalizeRoomCode(state.code) && !isProtectedRoom(state.code)) leaveRoom();
         await loadDeveloperRooms(false);
-        setInfo(total ? `${total} sala(s) foram removidas. A sala ${DEVELOPER_PROTECTED_ROOM} foi preservada.` : "Nenhuma sala foi removida.");
+        setInfo(total ? `${total} sala(s) foram removidas da lista. A sala ${DEVELOPER_PROTECTED_ROOM} foi preservada.` : "Nenhuma sala foi removida.");
         render();
       }catch(e){
         setSyncError(e && e.message ? e.message : String(e || "Erro ao remover salas."));
@@ -1391,7 +1401,7 @@ async function ensureMeLoaded(){
       });
     }
 
-    async function developerQuickSaveMeta(code){
+    async function developerSaveRoomAll(code){
       if(!session.developer) return alert("Somente Desenvolvedor.");
       const safeCode = String(code || "").toUpperCase();
       const roomName = String(document.querySelector(`[data-dev-name="${safeCode}"]`)?.value || "").trim();
@@ -1403,6 +1413,7 @@ async function ensureMeLoaded(){
       const commercialStatus = normalizeCommercialStatus(document.querySelector(`[data-dev-status="${safeCode}"]`)?.value || "ativo");
       const trialEndsAt = toDateInput(document.querySelector(`[data-dev-trial="${safeCode}"]`)?.value || "");
       const paidUntil = toDateInput(document.querySelector(`[data-dev-paiduntil="${safeCode}"]`)?.value || "");
+      const plan = normalizePlan(document.querySelector(`[data-dev-plan-select="${safeCode}"]`)?.value || "free");
       const clientNotes = String(document.querySelector(`[data-dev-notes="${safeCode}"]`)?.value || "").trim();
       const patch = {
         roomName: roomName || `Sala ${safeCode}`,
@@ -1413,7 +1424,9 @@ async function ensureMeLoaded(){
         commercialStatus,
         trialEndsAt,
         paidUntil,
+        plan,
         clientNotes,
+        open: ["inativo","inadimplente","bloqueado"].includes(commercialStatus) ? false : true,
         updatedAt: nowIso()
       };
       if(adminPass) patch.adminPass = adminPass;
@@ -1421,7 +1434,7 @@ async function ensureMeLoaded(){
         await metaUpdate(safeCode, patch);
         await loadDeveloperRooms(false);
         if(normalizeRoomCode(state.code) === safeCode){
-          if(roomName) state.roomName = roomName;
+          state.roomName = patch.roomName;
           state.roomSubtitle = roomSubtitle;
           state.matchLocation = matchLocation;
           state.ownerName = ownerName;
@@ -1429,10 +1442,12 @@ async function ensureMeLoaded(){
           state.commercialStatus = commercialStatus;
           state.trialEndsAt = trialEndsAt;
           state.paidUntil = paidUntil;
+          state.plan = plan;
           state.clientNotes = clientNotes;
+          state.open = !!patch.open;
           if(adminPass) state.adminPassStored = adminPass;
         }
-        setInfo(`Dados da sala ${safeCode} salvos.`);
+        setInfo(`Sala ${safeCode} salva com sucesso.`);
         render();
       }catch(e){
         setSyncError(e && e.message ? e.message : String(e || "Erro ao salvar dados da sala."));
@@ -1460,58 +1475,44 @@ function renderDeveloperRoomsPanel(){
   const allRooms = Array.isArray(state.developerRooms) ? state.developerRooms : [];
   const rooms = filteredDeveloperRooms();
   const openCount = allRooms.filter(room => room.open).length;
-  const protectedCount = allRooms.filter(room => isProtectedRoom(room.code)).length;
   const freeCount = allRooms.filter(room => normalizePlan(room.plan) === "free").length;
   const basicoCount = allRooms.filter(room => normalizePlan(room.plan) === "basico").length;
   const proCount = allRooms.filter(room => normalizePlan(room.plan) === "pro").length;
   const testeCount = allRooms.filter(room => normalizeCommercialStatus(room.commercialStatus) === "teste").length;
   const ativoCount = allRooms.filter(room => normalizeCommercialStatus(room.commercialStatus) === "ativo").length;
   const inadCount = allRooms.filter(room => normalizeCommercialStatus(room.commercialStatus) === "inadimplente").length;
-  const inativoCount = allRooms.filter(room => ["inativo","bloqueado"].includes(normalizeCommercialStatus(room.commercialStatus))).length;
-  const dueSoonCount = allRooms.filter(room => {
-    const alert = commercialAlertInfo(room);
-    return !!alert && alert.level === "warning";
-  }).length;
-  const overdueCount = allRooms.filter(room => {
-    const alert = commercialAlertInfo(room);
-    return !!alert && alert.level === "danger";
-  }).length;
   const q = escapeHtml(state.developerFilter || "");
   return `
     <div class="mt-5 rounded-2xl border bg-amber-50 p-4">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <h3 class="font-bold text-gray-800">Painel do Desenvolvedor</h3>
-          <p class="text-xs text-gray-600">Gestão técnica e comercial: salas, planos, teste grátis, vencimento, inadimplência e suporte.</p>
+          <p class="text-xs text-gray-600">Gestão central de salas, planos, clientes e cobrança. Tudo importante fica salvo por aqui.</p>
           <div class="mt-2 flex flex-wrap gap-2 text-[11px]">
             <span class="px-2 py-1 rounded-full bg-white border text-gray-700">Salas ${allRooms.length}</span>
             <span class="px-2 py-1 rounded-full bg-green-100 text-green-700">Abertas ${openCount}</span>
             <span class="px-2 py-1 rounded-full bg-sky-100 text-sky-700">Teste ${testeCount}</span>
             <span class="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">Ativas ${ativoCount}</span>
             <span class="px-2 py-1 rounded-full bg-red-100 text-red-700">Inadimplentes ${inadCount}</span>
-            <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800">Vencendo ${dueSoonCount}</span>
-            <span class="px-2 py-1 rounded-full bg-rose-100 text-rose-700">Vencidas ${overdueCount}</span>
-            <span class="px-2 py-1 rounded-full bg-gray-200 text-gray-700">Inativas ${inativoCount}</span>
             <span class="px-2 py-1 rounded-full bg-slate-100 text-slate-700">Free ${freeCount}</span>
             <span class="px-2 py-1 rounded-full bg-blue-100 text-blue-700">Básico ${basicoCount}</span>
             <span class="px-2 py-1 rounded-full bg-violet-100 text-violet-700">PRO ${proCount}</span>
-            <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800">Protegidas ${protectedCount}</span>
           </div>
         </div>
         <div class="flex flex-wrap gap-2">
           <button id="btnCreateTrialRoom" class="px-3 py-2 rounded-lg bg-sky-600 text-white hover:bg-sky-700 text-sm font-semibold">Criar teste grátis</button>
           <button id="btnDevCloseAllOpen" class="px-3 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-sm font-semibold">Fechar todas abertas</button>
           <button id="btnDevDeleteExceptProtected" class="px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 text-sm font-semibold">Remover todas exceto protegida</button>
-          <button id="btnDevRefresh" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar lista</button>
+          <button id="btnDevRefresh" class="px-3 py-2 rounded-lg border hover:bg-white text-sm font-semibold">Atualizar</button>
         </div>
       </div>
-      <div class="mt-3 grid gap-3 lg:grid-cols-[1.2fr_.8fr]">
-        <div class="rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-amber-900">
-          A sala protegida <b>${escapeHtml(DEVELOPER_PROTECTED_ROOM)}</b> não pode ser removida pelo painel. Use-a como sala demo principal do sistema.
+      <div class="mt-3 flex flex-col gap-3 lg:flex-row">
+        <div class="rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-amber-900 lg:flex-1">
+          A sala protegida <b>${escapeHtml(DEVELOPER_PROTECTED_ROOM)}</b> fica preservada. Use-a apenas se realmente quiser como base interna.
         </div>
-        <div class="rounded-xl border border-amber-200 bg-white px-3 py-2">
+        <div class="rounded-xl border border-amber-200 bg-white px-3 py-2 lg:w-[360px]">
           <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Busca rápida</div>
-          <input id="devRoomFilter" value="${q}" placeholder="Buscar por código, nome, cliente, WhatsApp, status, local ou plano" class="mt-2 w-full px-3 py-2 rounded-lg border text-sm" />
+          <input id="devRoomFilter" value="${q}" placeholder="Buscar por código, cliente, WhatsApp, status ou plano" class="mt-2 w-full px-3 py-2 rounded-lg border text-sm" />
         </div>
       </div>
       ${state.developerRoomsError ? `<div class="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${escapeHtml(state.developerRoomsError)}</div>` : ``}
@@ -1521,73 +1522,71 @@ function renderDeveloperRoomsPanel(){
           const statusClass = commercialStatusClass(room.commercialStatus);
           const summary = roomMetaSummary(room);
           const roomAlert = commercialAlertInfo(room);
-          const waLink = room.ownerWhatsApp ? `https://wa.me/${String(room.ownerWhatsApp).replace(/\D+/g,'')}` : '#';
+          const isOrphan = roomIsOrphan(room);
           return `
-          <div class="rounded-xl border bg-white p-3">
-            <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-              <div>
-                <div class="font-semibold text-gray-800">${escapeHtml(room.roomName || ('Sala ' + room.code))}</div>
-                <div class="text-xs text-gray-500">Código ${escapeHtml(room.code)}${room.roomSubtitle ? ' · ' + escapeHtml(room.roomSubtitle) : ''}${room.matchLocation ? ' · ' + escapeHtml(room.matchLocation) : ''}</div>
-                ${summary ? `<div class="mt-1 text-xs text-gray-500">${escapeHtml(summary)}</div>` : ``}
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <span class="text-[11px] px-2 py-1 rounded-full ${room.open ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${room.open ? 'Inscrição aberta' : 'Inscrição fechada'}</span>
-                  <span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">Plano ${escapeHtml(planLabel(room.plan))}</span>
-                  <span class="text-[11px] px-2 py-1 rounded-full ${statusClass}">${escapeHtml(commercialStatusLabel(room.commercialStatus))}</span>
-                  ${roomAlert ? `<span class="text-[11px] px-2 py-1 rounded-full ${roomAlert.level === 'danger' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-800'}">${roomAlert.level === 'danger' ? 'Atenção vencida' : 'Atenção vencendo'}</span>` : ``}
-                  ${protectedRoom ? `<span class="text-[11px] px-2 py-1 rounded-full bg-amber-100 text-amber-800">Sala protegida</span>` : ``}
+            <div class="rounded-xl border bg-white p-3">
+              <div class="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
+                <div>
+                  <div class="font-semibold text-gray-800">${escapeHtml(room.roomName || ('Sala ' + room.code))}</div>
+                  <div class="text-xs text-gray-500">Código ${escapeHtml(room.code)}${room.roomSubtitle ? ' · ' + escapeHtml(room.roomSubtitle) : ''}${room.matchLocation ? ' · ' + escapeHtml(room.matchLocation) : ''}</div>
+                  ${summary ? `<div class="mt-1 text-xs text-gray-500">${escapeHtml(summary)}</div>` : ``}
                 </div>
-                ${roomAlert ? `<div class="mt-2 rounded-lg border ${roomAlert.level === 'danger' ? 'border-red-200 bg-red-50 text-red-700' : 'border-amber-200 bg-amber-50 text-amber-800'} px-3 py-2 text-xs font-medium">${escapeHtml(roomAlert.text)}</div>` : ``}
+                <div class="flex flex-wrap gap-1.5 text-[11px]">
+                  <span class="px-2 py-1 rounded-full ${room.open ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${room.open ? 'Aberta' : 'Fechada'}</span>
+                  <span class="px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${escapeHtml(planLabel(room.plan))}</span>
+                  <span class="px-2 py-1 rounded-full ${statusClass}">${escapeHtml(commercialStatusLabel(room.commercialStatus))}</span>
+                  ${protectedRoom ? `<span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800">Protegida</span>` : ``}
+                  ${isOrphan ? `<span class="px-2 py-1 rounded-full bg-slate-100 text-slate-700">Órfã</span>` : ``}
+                </div>
               </div>
-              <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                <button data-dev-open="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir sala</button>
-                <button data-dev-copylink="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar link</button>
-                <button data-dev-copyaccess="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar acesso admin</button>
-                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">${room.open ? 'Fechar sala' : 'Abrir inscrições'}</button>
-                <button data-dev-reset="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-red-50 text-sm font-semibold">Resetar</button>
-                <button data-dev-remove="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg ${protectedRoom ? 'border bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-red-600 text-white hover:bg-red-700'} text-sm font-semibold" ${protectedRoom ? 'disabled' : ''}>Remover sala</button>
+              ${roomAlert ? `<div class="mt-2 rounded-lg border ${roomAlert.level === 'danger' ? 'border-red-200 bg-red-50 text-red-700' : 'border-amber-200 bg-amber-50 text-amber-800'} px-3 py-2 text-xs font-medium">${escapeHtml(roomAlert.text)}</div>` : ``}
+              <div class="mt-2 grid gap-2 md:grid-cols-3">
+                <input data-dev-name="${escapeHtml(room.code)}" value="${escapeHtml(room.roomName || '')}" placeholder="Nome da sala" class="px-3 py-2 rounded-lg border text-sm" />
+                <input data-dev-owner="${escapeHtml(room.code)}" value="${escapeHtml(room.ownerName || '')}" placeholder="Cliente / responsável" class="px-3 py-2 rounded-lg border text-sm" />
+                <input data-dev-whats="${escapeHtml(room.code)}" value="${escapeHtml(room.ownerWhatsApp || '')}" placeholder="WhatsApp do cliente" class="px-3 py-2 rounded-lg border text-sm" />
+              </div>
+              <div class="mt-2 grid gap-2 md:grid-cols-3">
+                <input data-dev-subtitle="${escapeHtml(room.code)}" value="${escapeHtml(room.roomSubtitle || '')}" placeholder="Subtítulo / grupo" class="px-3 py-2 rounded-lg border text-sm" />
+                <input data-dev-location="${escapeHtml(room.code)}" value="${escapeHtml(room.matchLocation || '')}" placeholder="Local" class="px-3 py-2 rounded-lg border text-sm" />
+                <input data-dev-adminpass="${escapeHtml(room.code)}" placeholder="Nova senha admin" class="px-3 py-2 rounded-lg border text-sm" />
+              </div>
+              <div class="mt-2 grid gap-2 md:grid-cols-4">
+                <select data-dev-plan-select="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border text-sm">
+                  <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
+                  <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
+                  <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
+                </select>
+                <select data-dev-status="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border text-sm">
+                  <option value="teste" ${normalizeCommercialStatus(room.commercialStatus)==='teste' ? 'selected' : ''}>Teste</option>
+                  <option value="ativo" ${normalizeCommercialStatus(room.commercialStatus)==='ativo' ? 'selected' : ''}>Ativo</option>
+                  <option value="inativo" ${normalizeCommercialStatus(room.commercialStatus)==='inativo' ? 'selected' : ''}>Inativo</option>
+                  <option value="inadimplente" ${normalizeCommercialStatus(room.commercialStatus)==='inadimplente' ? 'selected' : ''}>Inadimplente</option>
+                  <option value="bloqueado" ${normalizeCommercialStatus(room.commercialStatus)==='bloqueado' ? 'selected' : ''}>Bloqueado</option>
+                  <option value="demo" ${normalizeCommercialStatus(room.commercialStatus)==='demo' ? 'selected' : ''}>Demonstração</option>
+                </select>
+                <input data-dev-trial="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.trialEndsAt || ''))}" class="px-3 py-2 rounded-lg border text-sm" />
+                <input data-dev-paiduntil="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.paidUntil || ''))}" class="px-3 py-2 rounded-lg border text-sm" />
+              </div>
+              <textarea data-dev-notes="${escapeHtml(room.code)}" placeholder="Observações do cliente, cobrança e suporte" class="mt-2 w-full px-3 py-2 rounded-lg border text-sm min-h-[70px]">${escapeHtml(room.clientNotes || '')}</textarea>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <button data-dev-saveall="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-xs font-semibold">Salvar tudo</button>
+                <button data-dev-open="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-gray-50 text-xs font-semibold">Abrir sala</button>
+                <button data-dev-copylink="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-gray-50 text-xs font-semibold">Link</button>
+                <button data-dev-copyaccess="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-gray-50 text-xs font-semibold">Acesso admin</button>
+                <button data-dev-toggle="${escapeHtml(room.code)}" data-dev-openstate="${room.open ? '0' : '1'}" class="px-2.5 py-1.5 rounded-lg border hover:bg-gray-50 text-xs font-semibold">${room.open ? 'Fechar' : 'Abrir'}</button>
+                <button data-dev-activate="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-xs font-semibold">Ativar</button>
+                <button data-dev-block="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 text-xs font-semibold">Bloquear</button>
+                <button data-dev-extendtrial="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-sky-50 text-xs font-semibold">+7d</button>
+                <button data-dev-renewmonth="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-emerald-50 text-xs font-semibold">+1 mês</button>
+                <button data-dev-convert-basic="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-blue-50 text-xs font-semibold">Básico</button>
+                <button data-dev-convert-pro="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-violet-50 text-xs font-semibold">PRO</button>
+                <button data-dev-reset="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-red-50 text-xs font-semibold">Resetar</button>
+                <button data-dev-copyclient="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg border hover:bg-gray-50 text-xs font-semibold">Resumo</button>
+                <button data-dev-remove="${escapeHtml(room.code)}" class="px-2.5 py-1.5 rounded-lg ${protectedRoom ? 'border bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-red-600 text-white hover:bg-red-700'} text-xs font-semibold" ${protectedRoom ? 'disabled' : ''}>Remover</button>
               </div>
             </div>
-            <div class="mt-3 grid gap-2 md:grid-cols-3">
-              <input data-dev-name="${escapeHtml(room.code)}" value="${escapeHtml(room.roomName || '')}" placeholder="Nome da sala" class="px-3 py-2 rounded-lg border text-sm" />
-              <input data-dev-subtitle="${escapeHtml(room.code)}" value="${escapeHtml(room.roomSubtitle || '')}" placeholder="Subtítulo / grupo / cliente" class="px-3 py-2 rounded-lg border text-sm" />
-              <input data-dev-location="${escapeHtml(room.code)}" value="${escapeHtml(room.matchLocation || '')}" placeholder="Local principal" class="px-3 py-2 rounded-lg border text-sm" />
-            </div>
-            <div class="mt-2 grid gap-2 md:grid-cols-3">
-              <input data-dev-owner="${escapeHtml(room.code)}" value="${escapeHtml(room.ownerName || '')}" placeholder="Responsável / cliente" class="px-3 py-2 rounded-lg border text-sm" />
-              <input data-dev-whats="${escapeHtml(room.code)}" value="${escapeHtml(room.ownerWhatsApp || '')}" placeholder="WhatsApp do cliente" class="px-3 py-2 rounded-lg border text-sm" />
-              <input data-dev-adminpass="${escapeHtml(room.code)}" placeholder="Nova senha admin (deixe em branco para manter)" class="px-3 py-2 rounded-lg border text-sm" />
-            </div>
-            <div class="mt-2 grid gap-2 md:grid-cols-4">
-              <select data-dev-status="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border text-sm">
-                <option value="teste" ${normalizeCommercialStatus(room.commercialStatus)==='teste' ? 'selected' : ''}>Teste</option>
-                <option value="ativo" ${normalizeCommercialStatus(room.commercialStatus)==='ativo' ? 'selected' : ''}>Ativo</option>
-                <option value="inativo" ${normalizeCommercialStatus(room.commercialStatus)==='inativo' ? 'selected' : ''}>Inativo</option>
-                <option value="inadimplente" ${normalizeCommercialStatus(room.commercialStatus)==='inadimplente' ? 'selected' : ''}>Inadimplente</option>
-                <option value="bloqueado" ${normalizeCommercialStatus(room.commercialStatus)==='bloqueado' ? 'selected' : ''}>Bloqueado</option>
-                <option value="demo" ${normalizeCommercialStatus(room.commercialStatus)==='demo' ? 'selected' : ''}>Demonstração</option>
-              </select>
-              <input data-dev-trial="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.trialEndsAt || ''))}" class="px-3 py-2 rounded-lg border text-sm" />
-              <input data-dev-paiduntil="${escapeHtml(room.code)}" type="date" value="${escapeHtml(toDateInput(room.paidUntil || ''))}" class="px-3 py-2 rounded-lg border text-sm" />
-              <select data-dev-plan-select="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border text-sm">
-                <option value="free" ${room.plan === 'free' ? 'selected' : ''}>Free</option>
-                <option value="basico" ${room.plan === 'basico' ? 'selected' : ''}>Básico</option>
-                <option value="pro" ${room.plan === 'pro' ? 'selected' : ''}>PRO</option>
-              </select>
-            </div>
-            <textarea data-dev-notes="${escapeHtml(room.code)}" placeholder="Observações do cliente, vendas, vencimento, suporte..." class="mt-2 w-full px-3 py-2 rounded-lg border text-sm min-h-[84px]">${escapeHtml(room.clientNotes || '')}</textarea>
-            <div class="mt-2 grid gap-2 lg:grid-cols-2 xl:grid-cols-4">
-              <button data-dev-savemeta="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Salvar dados</button>
-              <button data-dev-saveplan="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-semibold">Salvar plano</button>
-              <button data-dev-convert-basic="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Converter p/ Básico</button>
-              <button data-dev-convert-pro="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-violet-600 text-white hover:bg-violet-700 text-sm font-semibold">Converter p/ PRO</button>
-              <button data-dev-extendtrial="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-sky-50 text-sm font-semibold">Prorrogar teste +7d</button>
-              <button data-dev-renewmonth="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-sm font-semibold">Renovar +1 mês</button>
-              <button data-dev-statusapply="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Aplicar status</button>
-              <a href="${waLink}" ${room.ownerWhatsApp ? 'target="_blank" rel="noopener noreferrer"' : ''} class="px-3 py-2 rounded-lg border hover:bg-green-50 text-sm font-semibold text-center ${room.ownerWhatsApp ? '' : 'opacity-50 pointer-events-none'}">WhatsApp cliente</a>
-              <button data-dev-copyclient="${escapeHtml(room.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar resumo</button>
-            </div>
-          </div>
-        `}).join('') : `<div class="rounded-xl border bg-white p-3 text-sm text-gray-500">Nenhuma sala encontrada ainda.</div>`}
+          `;
+        }).join('') : `<div class="rounded-xl border bg-white p-3 text-sm text-gray-500">Nenhuma sala encontrada.</div>`}
       </div>
     </div>
   `;
@@ -3054,20 +3053,7 @@ function openWhatsApp(text, numberDigits){
                     <div class="text-xs text-gray-500 mt-2">
                       <b>Nova rodada</b>: todo mundo volta a <b>Ausente</b> e confirma presença novamente. <b>Resetar</b> zera tudo.
                     </div>
-                    ${session.developer ? `
-                    <div class="mt-3 rounded-xl border p-3 bg-gray-50">
-                      <div class="text-sm font-semibold">Plano da sala</div>
-                      <div class="mt-2 flex flex-col sm:flex-row gap-2">
-                        <select id="roomPlanSelect" class="px-3 py-2 rounded-lg border flex-1">
-                          <option value="free" ${plan === "free" ? "selected" : ""}>Free</option>
-                          <option value="basico" ${plan === "basico" ? "selected" : ""}>Básico</option>
-                          <option value="pro" ${plan === "pro" ? "selected" : ""}>PRO</option>
-                        </select>
-                        <button id="btnSavePlan" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">Salvar plano</button>
-                      </div>
-                      <div class="mt-2 text-xs text-gray-500">Somente o Desenvolvedor pode alterar o plano da sala.</div>
-                    </div>
-                    ` : `<div class="mt-3 rounded-xl border p-3 bg-gray-50"><div class="text-sm font-semibold">Plano da sala</div><div class="mt-2 text-xs text-gray-500">Plano atual: <b>${escapeHtml(planName)}</b>. Somente o Desenvolvedor pode alterar.</div></div>`}
+                    <div class="mt-3 rounded-xl border p-3 bg-gray-50"><div class="text-sm font-semibold">Plano da sala</div><div class="mt-2 text-xs text-gray-500">Plano atual: <b>${escapeHtml(planName)}</b>. A alteração de plano fica disponível somente no Painel do Desenvolvedor.</div></div>
                     <div class="mt-3 rounded-xl border p-3 bg-gray-50">
                       <div class="text-sm font-semibold">Horário da partida</div>
                       <div class="mt-2 grid gap-2 sm:grid-cols-2">
@@ -3347,7 +3333,6 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnWAReport")) $("btnWAReport").onclick = ()=> whatsManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnDownloadReport")) $("btnDownloadReport").onclick = ()=> downloadManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnSavePersonalization")) $("btnSavePersonalization").onclick = ()=> savePersonalization();
-        if($("btnSavePlan") && session.developer) $("btnSavePlan").onclick = ()=> saveRoomPlan();
         if($("btnDevCloseAllOpen")) $("btnDevCloseAllOpen").onclick = ()=> developerCloseAllOpenRooms();
         if($("btnCopyRoomLink")) $("btnCopyRoomLink").onclick = ()=> copyToClipboard(buildRoomUrl(code));
 
@@ -3387,17 +3372,10 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
             developerCopyAdminAccess(roomCode);
           });
         });
-        document.querySelectorAll("[data-dev-savemeta]").forEach(btn=>{
+        document.querySelectorAll("[data-dev-saveall]").forEach(btn=>{
           btn.addEventListener("click", ()=>{
-            const roomCode = btn.getAttribute("data-dev-savemeta");
-            developerQuickSaveMeta(roomCode);
-          });
-        });
-        document.querySelectorAll("[data-dev-saveplan]").forEach(btn=>{
-          btn.addEventListener("click", ()=>{
-            const roomCode = btn.getAttribute("data-dev-saveplan");
-            const select = document.querySelector(`[data-dev-plan-select="${roomCode}"]`);
-            developerQuickSavePlan(roomCode, select ? select.value : "free");
+            const roomCode = btn.getAttribute("data-dev-saveall");
+            developerSaveRoomAll(roomCode);
           });
         });
         document.querySelectorAll("[data-dev-convert-basic]").forEach(btn=>{
@@ -3411,13 +3389,6 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         });
         document.querySelectorAll("[data-dev-renewmonth]").forEach(btn=>{
           btn.onclick = ()=> developerRenewMonthly(btn.getAttribute("data-dev-renewmonth"), 1);
-        });
-        document.querySelectorAll("[data-dev-statusapply]").forEach(btn=>{
-          btn.onclick = ()=> {
-            const roomCode = btn.getAttribute("data-dev-statusapply");
-            const select = document.querySelector(`[data-dev-status="${roomCode}"]`);
-            developerSetCommercialStatus(roomCode, select ? select.value : "ativo");
-          };
         });
         document.querySelectorAll("[data-dev-copyclient]").forEach(btn=>{
           btn.onclick = async ()=> {
@@ -3456,6 +3427,18 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
             const roomCode = btn.getAttribute("data-dev-toggle");
             const openState = btn.getAttribute("data-dev-openstate") === "1";
             developerToggleOpenRoom(roomCode, openState);
+          });
+        });
+        document.querySelectorAll("[data-dev-activate]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-activate");
+            developerSetCommercialStatus(roomCode, "ativo");
+          });
+        });
+        document.querySelectorAll("[data-dev-block]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const roomCode = btn.getAttribute("data-dev-block");
+            developerSetCommercialStatus(roomCode, "bloqueado");
           });
         });
 
@@ -3557,10 +3540,8 @@ window.addEventListener("unhandledrejection", (ev)=>{
       if(session.developer) loadDeveloperRooms(true);
 
       const roomFromQuery = roomCodeFromUrl();
-      const lastRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, "") || "");
-      const startupRoom = roomFromQuery || lastRoom;
-      if(startupRoom){
-        joinRoomByCode(startupRoom);
+      if(roomFromQuery){
+        joinRoomByCode(roomFromQuery);
       }
 
       if ("serviceWorker" in navigator) {
