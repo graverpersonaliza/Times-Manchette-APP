@@ -345,7 +345,7 @@ function safeBoldInfo(s){
 
     function upgradeMessage(feature){
       const map = {
-        multiGroups: "Múltiplos grupos",
+        multiGroups: "Grupos",
         history: "Histórico de partidas",
         ranking: "Ranking",
         stats: "Estatísticas",
@@ -2844,7 +2844,7 @@ function openWhatsApp(text, numberDigits){
           ` : `
             <div class="mt-3 text-sm text-gray-500">Nenhuma sala recente ainda. Entre em uma sala e ela ficará salva aqui para acesso rápido.</div>
           `}
-          ${!featureAllowed('multiGroups') ? `<div class="mt-3">${premiumLockCard('Múltiplos grupos', 'No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.', 'múltiplos grupos')}</div>` : ``}
+          ${!featureAllowed('multiGroups') ? `<div class="mt-3">${premiumLockCard('Grupos', 'No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.', 'grupos')}</div>` : ``}
         </div>
         ${renderDeveloperRoomsPanel()}
       `;
@@ -3180,7 +3180,7 @@ function openWhatsApp(text, numberDigits){
                 ` : ``}
 
                 <div class="border-t pt-3">
-                  <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Múltiplos grupos da mesma sala</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${roomGroupsArray().length}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
+                  <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Grupos</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${roomGroupsArray().length}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
                   <div class="rounded-xl border p-3 bg-gray-50">
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-sm text-gray-700">
@@ -3205,7 +3205,7 @@ function openWhatsApp(text, numberDigits){
                         `).join('')}
                       </div>
                     ` : `<div class="mt-3 text-sm text-gray-500">Nenhum grupo interno salvo nesta sala ainda.</div>`}
-                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos internos", "No plano Free você salva 1 grupo interno. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.", "múltiplos grupos internos")}</div>` : ``}
+                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos internos", "No plano Free você salva 1 grupo interno. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.", "grupos internos")}</div>` : ``}
                   </div>
                 </div>
 
