@@ -421,7 +421,7 @@ function safeBoldInfo(s){
       const existing = roomGroupsArray();
       const limit = maxGroupsForPlan();
       const suggested = activeInternalGroupLabel() || state.roomSubtitle || '';
-      const name = String(prompt('Nome deste grupo interno', suggested) || '').trim();
+      const name = String(prompt('Nome do grupo', suggested) || '').trim();
       if(!name) return false;
       const id = genCode(8);
       if(existing.length >= limit){
@@ -446,10 +446,48 @@ function safeBoldInfo(s){
           activeInternalGroupId: id,
           activeInternalGroupName: name
         });
-        setInfo(`Grupo interno "${name}" salvo nesta sala.`);
+        setInfo(`Grupo "${name}" criado nesta sala.`);
         return true;
       }catch(e){
         setSyncError(e && e.message ? e.message : String(e || 'Erro ao salvar grupo interno.'));
+        return false;
+      }
+    }
+
+    async function updateCurrentInternalGroup(){
+      const code = normalizeRoomCode(state.code);
+      const groupId = String(state.activeInternalGroupId || '').trim();
+      if(!code || !groupId) return false;
+      if(!session.admin && !session.developer){
+        setInfo('Somente Admin ou Desenvolvedor podem atualizar grupos.');
+        return false;
+      }
+      const roomGroups = Object.assign({}, state.roomGroups || {});
+      if(!roomGroups[groupId]){
+        setInfo('Abra um grupo salvo antes de atualizar.');
+        return false;
+      }
+      const currentName = String(roomGroups[groupId].name || state.activeInternalGroupName || '').trim() || 'Grupo';
+      roomGroups[groupId] = Object.assign({}, roomGroups[groupId], {
+        name: currentName,
+        roomName: String(state.roomName || '').trim(),
+        roomSubtitle: String(state.roomSubtitle || '').trim(),
+        team1Name: String(state.team1Name || 'Time 1').trim() || 'Time 1',
+        team2Name: String(state.team2Name || 'Time 2').trim() || 'Time 2',
+        themeColor: String(state.themeColor || '#2563eb').trim() || '#2563eb',
+        updatedAtMs: nowMs(),
+        updatedAt: nowIso()
+      });
+      try{
+        await metaUpdate(code, {
+          roomGroups,
+          activeInternalGroupId: groupId,
+          activeInternalGroupName: currentName
+        });
+        setInfo(`Grupo "${currentName}" atualizado.`);
+        return true;
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || 'Erro ao atualizar grupo.'));
         return false;
       }
     }
@@ -3187,7 +3225,7 @@ function openWhatsApp(text, numberDigits){
                         <div class="font-semibold">${activeInternalGroupLabel() ? escapeHtml(activeInternalGroupLabel()) : 'Grupo atual sem nome salvo'}</div>
                         <div class="text-xs text-gray-500">Crie variações dentro desta sala.</div>
                       </div>
-                      ${session.admin ? `<button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar grupo atual</button>` : ``}
+                      ${session.admin ? `<div class="flex flex-wrap gap-2"><button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Criar grupo</button>${activeInternalGroupLabel() ? `<button id="btnUpdateGroup" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">Atualizar grupo</button>` : ``}</div>` : ``}
                     </div>
                     
                     ${roomGroupsArray().length ? `
@@ -3199,7 +3237,7 @@ function openWhatsApp(text, numberDigits){
                               <div class="text-xs text-gray-500">${g.roomSubtitle ? escapeHtml(g.roomSubtitle) + ' · ' : ''}Atualizado em ${escapeHtml(fmtBR(g.updatedAtMs || g.updatedAt || ''))}</div>
                             </div>
                             <div class="flex flex-wrap gap-2">
-                              ${session.admin ? `<button data-open-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir grupo</button><button data-delete-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir grupo</button>` : ``}
+                              ${session.admin ? `<button data-open-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir</button><button data-delete-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>` : ``}
                             </div>
                           </div>
                         `).join('')}
@@ -3210,7 +3248,6 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
                 <div class="border-t pt-3">
-                  <h3 class="font-semibold mb-2">Gestão da sala</h3>
                   ${session.admin ? `
                     <div class="text-sm text-green-700 font-semibold">✓ ${session.developer ? "Desenvolvedor ativo" : "Admin ativo"}</div>
                     <div class="mt-2 flex flex-wrap gap-1.5">
@@ -3495,6 +3532,7 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnReset")) $("btnReset").onclick = ()=> resetCurrentRoom();
 
         if($("btnSaveGroup")) $("btnSaveGroup").onclick = ()=> saveCurrentInternalGroup();
+        if($("btnUpdateGroup")) $("btnUpdateGroup").onclick = ()=> updateCurrentInternalGroup();
         document.querySelectorAll("[data-open-internal-group]").forEach(btn=>{
           btn.addEventListener("click", ()=>{
             const id = btn.getAttribute("data-open-internal-group");
