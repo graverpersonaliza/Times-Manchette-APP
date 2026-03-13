@@ -17,8 +17,7 @@
     // ===============================
     const LS_SESSION = "vb_session_v4";
     const LS_LAST_CODE = "vb_last_code_v3";
-    const LS_GROUPS = "vb_groups_v1"; // legado: salas recentes antigas
-    const LS_RECENT_ROOMS = "vb_recent_rooms_v1";
+    const LS_GROUPS = "vb_groups_v1";
 
     const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
 
@@ -88,14 +87,11 @@
       adminPassStored: "",
       developerRooms: [],
       developerRoomsError: "",
-      developerFilter: "",
-      roomGroups: {},
-      activeInternalGroupId: "",
-      activeInternalGroupName: ""
+      developerFilter: ""
     };
 
     let db = null;
-    let unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null, groups:null };
+    let unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
 
     // ===============================
     // Helpers
@@ -276,54 +272,17 @@ function safeBoldInfo(s){
       return false;
     }
 
-    function loadLegacySavedRooms(){
+    function loadGroups(){
       const raw = load(LS_GROUPS, []);
       return Array.isArray(raw) ? raw : [];
     }
 
-    function normalizeRecentRoom(entry){
-      const code = normalizeRoomCode(entry && entry.code);
-      if(!code) return null;
-      return {
-        code,
-        roomName: String((entry && entry.roomName) || "").trim(),
-        roomSubtitle: String((entry && entry.roomSubtitle) || "").trim(),
-        updatedAtMs: Number((entry && entry.updatedAtMs) || nowMs())
-      };
-    }
-
-    function loadGroups(){
-      const current = load(LS_RECENT_ROOMS, null);
-      let rooms = Array.isArray(current) ? current : [];
-      if(!rooms.length){
-        rooms = loadLegacySavedRooms().map(normalizeRecentRoom).filter(Boolean);
-        if(rooms.length) save(LS_RECENT_ROOMS, rooms);
-      }
-      return Array.isArray(rooms) ? rooms.filter(Boolean) : [];
-    }
-
     function saveGroups(groups){
-      save(LS_RECENT_ROOMS, Array.isArray(groups) ? groups : []);
+      save(LS_GROUPS, Array.isArray(groups) ? groups : []);
     }
 
     function getSavedGroups(){
       return loadGroups().sort((a,b)=>(Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0)));
-    }
-
-    function roomGroupsArray(){
-      return Object.values(state.roomGroups || {}).sort((a,b)=>(Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0)));
-    }
-
-    function activeInternalGroupLabel(){
-      return String(state.activeInternalGroupName || "").trim();
-    }
-
-    function maxInternalGroupsForPlan(plan = currentPlan()){
-      const p = normalizePlan(plan);
-      if(session.developer) return 999;
-      if(p === "pro") return 999;
-      if(p === "basico") return 3;
-      return 1;
     }
     function normalizePlan(value){
       const v = String(value || "free").trim().toLowerCase();
@@ -343,11 +302,16 @@ function safeBoldInfo(s){
     }
 
     function maxGroupsForPlan(plan = currentPlan()){
-      return maxInternalGroupsForPlan(plan);
+      const p = normalizePlan(plan);
+      if(p === "pro") return 999;
+      if(p === "basico") return 3;
+      return 1;
     }
 
     function getSavedGroupsForCurrentPlan(){
-      return getSavedGroups();
+      const groups = getSavedGroups();
+      const limit = maxGroupsForPlan();
+      return limit >= 999 ? groups : groups.slice(0, limit);
     }
 
     function upgradeWhatsLink(feature){
@@ -358,7 +322,7 @@ function safeBoldInfo(s){
     function featureAllowed(feature){
       if(session.developer) return true;
       const plan = currentPlan();
-      if(feature === "multiGroups") return maxInternalGroupsForPlan(plan) > 1;
+      if(feature === "multiGroups") return maxGroupsForPlan(plan) > 1;
       if(feature === "history") return plan === "basico" || plan === "pro";
       if(feature === "ranking") return plan === "basico" || plan === "pro";
       if(feature === "stats") return plan === "basico" || plan === "pro";
@@ -399,14 +363,17 @@ function safeBoldInfo(s){
     function upsertSavedGroup(profile){
       const code = normalizeRoomCode(profile && profile.code);
       if(!code) return;
-      const rooms = loadGroups().filter(g => normalizeRoomCode(g.code) !== code);
-      rooms.push({
+      const groups = loadGroups().filter(g => normalizeRoomCode(g.code) !== code);
+      groups.push({
         code,
         roomName: String((profile && profile.roomName) || "").trim(),
         roomSubtitle: String((profile && profile.roomSubtitle) || "").trim(),
+        team1Name: String((profile && profile.team1Name) || "Time 1").trim() || "Time 1",
+        team2Name: String((profile && profile.team2Name) || "Time 2").trim() || "Time 2",
+        themeColor: String((profile && profile.themeColor) || "#2563eb").trim() || "#2563eb",
         updatedAtMs: Number((profile && profile.updatedAtMs) || nowMs())
       });
-      saveGroups(rooms);
+      saveGroups(groups);
     }
 
     function removeSavedGroup(code){
@@ -418,98 +385,28 @@ function safeBoldInfo(s){
     function rememberCurrentGroup(silent=false){
       const code = normalizeRoomCode(state.code);
       if(!code) return false;
+      const groups = loadGroups();
+      const alreadyExists = groups.some(g => normalizeRoomCode(g.code) === code);
+      const maxGroups = maxGroupsForPlan();
+
+      if(!alreadyExists && groups.length >= maxGroups){
+        if(!silent) setInfo(`Seu plano ${planLabel()} permite salvar até ${maxGroups} grupo(s). Faça upgrade para liberar mais grupos.`);
+        else render();
+        return false;
+      }
+
       upsertSavedGroup({
         code,
         roomName: state.roomName || "",
         roomSubtitle: state.roomSubtitle || "",
+        team1Name: state.team1Name || "Time 1",
+        team2Name: state.team2Name || "Time 2",
+        themeColor: state.themeColor || "#2563eb",
         updatedAtMs: nowMs()
       });
-      if(!silent) setInfo("Sala salva para acesso rápido.");
+      if(!silent) setInfo("Grupo salvo para acesso rápido.");
       else render();
       return true;
-    }
-
-    async function saveCurrentInternalGroup(){
-      if(!state.code) return false;
-      if(!session.admin && !session.developer){
-        setInfo("Somente Admin ou Desenvolvedor podem salvar grupos internos.");
-        return false;
-      }
-      const currentGroups = roomGroupsArray();
-      const limit = maxInternalGroupsForPlan();
-      if(currentGroups.length >= limit){
-        setInfo(`Seu plano ${planLabel()} permite até ${limit} grupo(s) dentro desta sala.`);
-        render();
-        return false;
-      }
-      const suggested = activeInternalGroupLabel() || state.roomSubtitle || "";
-      const name = String(prompt("Nome deste grupo interno", suggested) || "").trim();
-      if(!name) return false;
-      const id = genCode(8);
-      const payload = {
-        id,
-        name,
-        roomName: String(state.roomName || "").trim(),
-        roomSubtitle: String(state.roomSubtitle || "").trim(),
-        team1Name: String(state.team1Name || "Time 1").trim() || "Time 1",
-        team2Name: String(state.team2Name || "Time 2").trim() || "Time 2",
-        themeColor: String(state.themeColor || "#2563eb").trim() || "#2563eb",
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
-        updatedAtMs: nowMs()
-      };
-      try{
-        await groupsCol(state.code).doc(id).set(payload, { merge:true });
-        await metaUpdate(state.code, { activeInternalGroupId: id, activeInternalGroupName: name });
-        setInfo(`Grupo interno "${name}" salvo nesta sala.`);
-        return true;
-      }catch(e){
-        setSyncError(e && e.message ? e.message : String(e || "Erro ao salvar grupo interno."));
-        return false;
-      }
-    }
-
-    async function openInternalGroup(groupId){
-      const id = String(groupId || "").trim();
-      const group = state.roomGroups && state.roomGroups[id];
-      if(!state.code || !group) return;
-      try{
-        await metaUpdate(state.code, {
-          roomName: String(group.roomName || state.roomName || "").trim() || "Manchette Volleyball",
-          roomSubtitle: String(group.roomSubtitle || "").trim(),
-          team1Name: String(group.team1Name || "Time 1").trim() || "Time 1",
-          team2Name: String(group.team2Name || "Time 2").trim() || "Time 2",
-          themeColor: String(group.themeColor || "#2563eb").trim() || "#2563eb",
-          activeInternalGroupId: id,
-          activeInternalGroupName: String(group.name || "").trim()
-        });
-        setInfo(`Grupo interno "${group.name || id}" carregado nesta sala.`);
-      }catch(e){
-        setSyncError(e && e.message ? e.message : String(e || "Erro ao abrir grupo interno."));
-      }
-    }
-
-    async function deleteInternalGroup(groupId){
-      const id = String(groupId || "").trim();
-      const group = state.roomGroups && state.roomGroups[id];
-      if(!state.code || !group) return;
-      if(!session.admin && !session.developer){
-        setInfo("Somente Admin ou Desenvolvedor podem excluir grupos internos.");
-        return;
-      }
-      if(!confirm(`Excluir o grupo interno "${group.name || id}" desta sala?`)) return;
-      try{
-        await groupsCol(state.code).doc(id).delete();
-        const patch = {};
-        if(String(state.activeInternalGroupId || "") === id){
-          patch.activeInternalGroupId = "";
-          patch.activeInternalGroupName = "";
-          await metaUpdate(state.code, patch);
-        }
-        setInfo(`Grupo interno "${group.name || id}" removido.`);
-      }catch(e){
-        setSyncError(e && e.message ? e.message : String(e || "Erro ao excluir grupo interno."));
-      }
     }
 
     function buildRoomUrl(code){
@@ -1069,7 +966,6 @@ async function ensureMeLoaded(){
     function playersCol(code){ return matchDoc(code).collection("players"); }
     function ratingsCol(code){ return matchDoc(code).collection("ratings"); }
     function snapshotsCol(code){ return matchDoc(code).collection("snapshots"); }
-    function groupsCol(code){ return matchDoc(code).collection("groups"); }
     function roundsCol(code){ return matchDoc(code).collection("rounds"); }
     function roundDoc(code, roundId){ return roundsCol(code).doc(String(roundId)); }
     function attendanceCol(code, roundId){ return roundDoc(code, roundId).collection("attendance"); }
@@ -1081,8 +977,6 @@ async function ensureMeLoaded(){
         open:true,
         plan:"free",
         commercialStatus:"ativo",
-        activeInternalGroupId:"",
-        activeInternalGroupName:"",
         createdAt: nowIso(),
         updatedAt: nowIso()
       }, patch || {}), { merge:true });
@@ -1117,8 +1011,7 @@ async function ensureMeLoaded(){
       try{ unsub.attendance && unsub.attendance(); }catch{}
       try{ unsub.ratings && unsub.ratings(); }catch{}
       try{ unsub.snapshots && unsub.snapshots(); }catch{}
-      try{ unsub.groups && unsub.groups(); }catch{}
-      unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null, groups:null };
+      unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
     }
 
     function attachAttendanceListener(code, roundId){
@@ -1161,8 +1054,6 @@ async function ensureMeLoaded(){
         state.paidUntil = d && d.paidUntil ? toDateInput(d.paidUntil) : "";
         state.clientNotes = d && d.clientNotes ? String(d.clientNotes) : "";
         state.adminPassStored = d && d.adminPass ? String(d.adminPass) : "";
-        state.activeInternalGroupId = d && d.activeInternalGroupId ? String(d.activeInternalGroupId) : "";
-        state.activeInternalGroupName = d && d.activeInternalGroupName ? String(d.activeInternalGroupName) : "";
 
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
         const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
@@ -1199,13 +1090,6 @@ async function ensureMeLoaded(){
         const obj = {};
         qs.forEach(doc=> obj[doc.id] = doc.data());
         state.snapshots = obj;
-        render();
-      }, (err)=> setSyncError(err && err.message ? err.message : err));
-
-      unsub.groups = groupsCol(c).orderBy("updatedAtMs","desc").limit(100).onSnapshot((qs)=>{
-        const obj = {};
-        qs.forEach(doc=> obj[doc.id] = Object.assign({ id: doc.id }, doc.data() || {}));
-        state.roomGroups = obj;
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
     }
@@ -2835,10 +2719,10 @@ function openWhatsApp(text, numberDigits){
         <div class="mt-5 rounded-2xl border bg-gray-50 p-4">
           <div class="flex items-center justify-between gap-2">
             <div>
-              <h3 class="font-bold text-gray-800">Salas recentes</h3>
-              <p class="text-xs text-gray-500">Acesso rápido às salas já usadas neste dispositivo.</p>
+              <h3 class="font-bold text-gray-800">Múltiplos grupos</h3>
+              <p class="text-xs text-gray-500">Salve seus grupos para entrar com um toque.</p>
             </div>
-            <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${allSavedGroupsCount} sala(s)</span>
+            <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? '∞' : groupsLimit} grupo(s)</span>
           </div>
 
           ${savedGroups.length ? `
@@ -2846,19 +2730,20 @@ function openWhatsApp(text, numberDigits){
               ${savedGroups.map(g => `
                 <div class="rounded-xl border bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div>
-                    <div class="font-semibold text-gray-800">${escapeHtml(g.roomName || ('Sala ' + g.code))}</div>
-                    <div class="text-xs text-gray-500">Código ${escapeHtml(g.code)}${g.roomSubtitle ? ' · ' + escapeHtml(g.roomSubtitle) : ''}</div>
+                    <div class="font-semibold text-gray-800">${escapeHtml(g.roomName || ('Grupo ' + g.code))}</div>
+                    <div class="text-xs text-gray-500">Sala ${escapeHtml(g.code)}${g.roomSubtitle ? ' · ' + escapeHtml(g.roomSubtitle) : ''}</div>
                   </div>
                   <div class="flex flex-wrap gap-2">
-                    <button data-open-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir sala</button>
-                    ${mode !== 'player' ? `<button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Remover da lista</button>` : ``}
+                    <button data-open-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir</button>
+                    ${mode !== 'player' ? `<button data-delete-group="${escapeHtml(g.code)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir</button>` : ``}
                   </div>
                 </div>
               `).join('')}
             </div>
           ` : `
-            <div class="mt-3 text-sm text-gray-500">Nenhuma sala recente ainda. Entre em uma sala para deixá-la salva neste dispositivo.</div>
+            <div class="mt-3 text-sm text-gray-500">Nenhum grupo salvo ainda. Entre em uma sala e clique em <b>Salvar este grupo</b>.</div>
           `}
+          ${!featureAllowed('multiGroups') ? `<div class="mt-3">${premiumLockCard('Múltiplos grupos', 'No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.', 'múltiplos grupos')}</div>` : ``}
         </div>
         ${renderDeveloperRoomsPanel()}
       `;
@@ -2878,11 +2763,9 @@ function openWhatsApp(text, numberDigits){
       const plan = currentPlan();
       const planName = planLabel(plan);
       const accessName = accessModeLabel();
-      const groupsLimit = maxInternalGroupsForPlan(plan);
+      const groupsLimit = maxGroupsForPlan(plan);
       const savedGroups = getSavedGroupsForCurrentPlan();
       const allSavedGroupsCount = getSavedGroups().length;
-      const internalGroups = roomGroupsArray();
-      const internalGroupsCount = internalGroups.length;
       const roomDisplayName = (state.roomName || "").trim() || "Manchette Volleyball";
       const roomSubtitle = (state.roomSubtitle || "").trim();
       const team1Label = (state.team1Name || "").trim() || "Time 1";
@@ -3046,36 +2929,167 @@ function openWhatsApp(text, numberDigits){
 </div>
 
                     <div class="border-t pt-3">
-                  <div class="flex items-center justify-between gap-2 mb-2">
-                    <h3 class="font-semibold">Múltiplos grupos da mesma sala</h3>
-                    <span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${internalGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span>
+                  <div class="grid gap-2">
+                                          <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
+                                            🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
+                                          </div>
+                    
+
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
+                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
+                    </div>
+
+                    <div class="text-xs text-gray-600">
+                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
+                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
+                      <span class="font-semibold">${waiting.length}</span> em espera
+                    </div>
+
+                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>Avaliar jogadores</button>
                   </div>
+
+                  ${bMsg.text ? `
+                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
+                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
+                    </div>
+                  ` : ``}
+                </div>
+
+<div class="mt-3 rounded-xl border bg-white p-3">
+                      <div class="text-sm font-extrabold text-gray-800">Atualizar minha inscrição</div>
+                      <div class="mt-2">
+  <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
+</div>
+<div class="mt-2 grid grid-cols-2 gap-2">
+
+                        <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
+                          ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
+                        </select>
+                        <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
+                          ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"Coringa")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
+                        </select>
+                      </div>
+                      <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
+                        Salvar inscrição
+                      </button>
+                      <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
+                    </div>
+
+<div class="mt-3 rounded-xl border bg-white p-3">
+  <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
+  <div class="mt-1 text-xs text-gray-500">Use este código para entrar na mesma inscrição em outro celular/PC.</div>
+  <div class="mt-2 flex items-center gap-2">
+    <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
+      ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
+    </div>
+    <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
+      Copiar
+    </button>
+</div>
+</div>
+
+  ${!meObj.accessCode ? `
+    <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
+      Gerar meu código
+    </button>
+  ` : ``}
+</div>
+                    <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
+                      Sair da lista
+                    </button>
+
+                    ${myPresent ? `
+` : `
+                      <div class="mt-2 text-sm text-gray-600">
+                        Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
+                      </div>
+                    `}
+                  ` : `
+                    ${session.prevPlayerId ? `
+                      <button id="btnBackToMe" class="w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+                        Voltar para meu jogador
+                      </button>
+                    ` : ``}
+<div class="mt-2 rounded-xl border bg-gray-50 p-3">
+
+  <div class="text-sm font-extrabold text-gray-800">Já se inscreveu?</div>
+  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar sua inscrição neste aparelho.</div>
+  <div class="mt-2 flex gap-2">
+    <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
+    <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
+  </div>
+</div>
+<div class="text-xs text-gray-500 mt-2">Dica: ao se inscrever, anote seu Código do Jogador.</div>
+`}
+                </div>
+
+                
+
+                ${session.admin ? `
+                <div class="border-t pt-3">
+                  <h3 class="font-semibold mb-2">Compartilhar</h3>
+
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnCopyTeams" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Copiar tabela</button>
+                      <button id="btnWATeams" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>WhatsApp</button>
+                      <button id="btnDownloadPng" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Baixar lista</button>
+                      <button id="btnSaveTeams" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Salvar no histórico</button>
+                    </div>
+                    <div class="mt-2 text-xs text-gray-500">Somente admin. Copie/manda no WhatsApp (texto) ou baixar lista.</div>
+
+                    <div class="mt-4">
+                      <div class="flex items-center justify-between">
+                        <div class="font-semibold">Histórico (últimos 10)</div>
+                        <div class="text-xs text-gray-500">${Object.keys(state.snapshots||{}).length} salvo(s)</div>
+                      </div>
+
+                      ${Object.keys(state.snapshots||{}).length ? `
+                        <div class="mt-2 space-y-2">
+                          ${Object.values(state.snapshots||{}).sort((a,b)=>(b.createdAtMs||0)-(a.createdAtMs||0)).slice(0,3).map(s => `
+                            <div class="rounded-xl border p-3">
+                              <div class="flex items-center justify-between gap-2">
+                                <div class="text-sm font-semibold">${escapeHtml(fmtBR(s.createdAtMs || s.createdAt))}${s.by ? ` · ${escapeHtml(s.by)}` : ""}</div>
+                                <div class="flex flex-wrap gap-2">
+                                  <button data-snapcopy="${s.id}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">Copiar</button>
+                                  <button data-snapwa="${s.id}" class="px-2 py-1 rounded-lg bg-green-600 text-white hover:bg-green-700 text-xs font-semibold">WhatsApp</button>
+                                  <button data-snapdel="${s.id}" class="px-2 py-1 rounded-lg bg-red-600 text-white hover:bg-red-700 text-xs font-semibold">Excluir</button>
+                                </div>
+                              </div>
+
+                              <div class="mt-2 grid grid-cols-2 gap-3 text-xs text-gray-700">
+                                <div>
+                                  <div class="font-semibold text-blue-700">Time 1</div>
+                                  ${(s.team1||[]).length ? (s.team1||[]).map(p => `<div>${escapeHtml(p.name)} · ${Number(p.note).toFixed(1)}</div>`).join("") : `<div class="text-gray-500">Vazio</div>`}
+                                </div>
+                                <div>
+                                  <div class="font-semibold text-orange-700">Time 2</div>
+                                  ${(s.team2||[]).length ? (s.team2||[]).map(p => `<div>${escapeHtml(p.name)} · ${Number(p.note).toFixed(1)}</div>`).join("") : `<div class="text-gray-500">Vazio</div>`}
+                                </div>
+                              </div>
+                            </div>
+                          `).join("")}
+                        </div>
+                        <div class="mt-2 text-xs text-gray-500">Mostrando os 3 mais recentes.</div>
+                      ` : `
+                        ${canUseHistory ? `<div class="mt-2 text-sm text-gray-500">Ainda não há times salvos.</div>` : `<div class="mt-2">${premiumLockCard("Histórico de partidas", "No plano Free o histórico fica bloqueado. Libere no Básico ou PRO.", "histórico de partidas")}</div>`}
+                      `}
+                    </div>
+                  </div>
+                ` : ``}
+
+                <div class="border-t pt-3">
+                  <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Múltiplos grupos</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
                   <div class="rounded-xl border p-3 bg-gray-50">
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-sm text-gray-700">
-                        <div class="font-semibold">${activeInternalGroupLabel() ? escapeHtml(activeInternalGroupLabel()) : "Grupo atual sem nome salvo"}</div>
-                        <div class="text-xs text-gray-500">Todos os grupos abaixo pertencem à sala ${escapeHtml(code)}.</div>
+                        <div class="font-semibold">${escapeHtml(roomDisplayName)}</div>
+                        <div class="text-xs text-gray-500">Sala ${escapeHtml(code)}</div>
                       </div>
-                      ${session.admin ? `<button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar grupo atual</button>` : ``}
+                      <button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar este grupo</button>
                     </div>
-                    <div class="mt-2 text-xs text-gray-500">Use grupos internos para criar variações dentro da mesma sala, sem gerar novas salas.</div>
-                    ${internalGroups.length ? `
-                      <div class="mt-3 space-y-2">
-                        ${internalGroups.map(g => `
-                          <div class="rounded-xl border bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${String(g.id||"")===String(state.activeInternalGroupId||"") ? 'border-indigo-300 ring-1 ring-indigo-200' : ''}">
-                            <div>
-                              <div class="font-semibold text-gray-800">${escapeHtml(g.name || ('Grupo ' + g.id))}</div>
-                              <div class="text-xs text-gray-500">${g.roomSubtitle ? escapeHtml(g.roomSubtitle) + ' · ' : ''}Atualizado em ${escapeHtml(fmtBR(g.updatedAtMs || g.updatedAt || ""))}</div>
-                            </div>
-                            <div class="flex flex-wrap gap-2">
-                              ${session.admin ? `<button data-open-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir grupo</button>
-                              <button data-delete-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir grupo</button>` : `<span class="text-xs text-gray-500">Apenas Admin/Desenvolvedor gerenciam grupos internos.</span>`}
-                            </div>
-                          </div>
-                        `).join('')}
-                      </div>
-                    ` : `<div class="mt-3 text-sm text-gray-500">Nenhum grupo interno salvo nesta sala ainda.</div>`}
-                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos internos", "No plano Free você salva 1 grupo interno. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.", "múltiplos grupos internos")}</div>` : ``}
+                    <div class="mt-2 text-xs text-gray-500">Os outros grupos salvos aparecem somente fora da sala, na tela inicial.</div>
+                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos", "O plano Free salva 1 grupo. Faça upgrade para liberar 3 grupos no Básico ou grupos ilimitados no PRO.", "múltiplos grupos")}</div>` : ``}
                   </div>
                 </div>
 
@@ -3368,7 +3382,7 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnSort")) $("btnSort").onclick = ()=> randomizeTeams();
         if($("btnReset")) $("btnReset").onclick = ()=> resetCurrentRoom();
 
-        if($("btnSaveGroup")) $("btnSaveGroup").onclick = ()=> saveCurrentInternalGroup();
+        if($("btnSaveGroup")) $("btnSaveGroup").onclick = ()=> rememberCurrentGroup();
         if($("btnCopyReport")) $("btnCopyReport").onclick = ()=> copyManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnWAReport")) $("btnWAReport").onclick = ()=> whatsManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnDownloadReport")) $("btnDownloadReport").onclick = ()=> downloadManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
@@ -3386,19 +3400,7 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
           btn.addEventListener("click", ()=>{
             const roomCode = btn.getAttribute("data-delete-group");
             removeSavedGroup(roomCode);
-            setInfo("Sala removida da lista local.");
-          });
-        });
-        document.querySelectorAll("[data-open-internal-group]").forEach(btn=>{
-          btn.addEventListener("click", ()=>{
-            const groupId = btn.getAttribute("data-open-internal-group");
-            openInternalGroup(groupId);
-          });
-        });
-        document.querySelectorAll("[data-delete-internal-group]").forEach(btn=>{
-          btn.addEventListener("click", ()=>{
-            const groupId = btn.getAttribute("data-delete-internal-group");
-            deleteInternalGroup(groupId);
+            setInfo("Grupo removido da lista salva.");
           });
         });
 
@@ -3540,7 +3542,7 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
       btn.addEventListener("click", ()=>{
         const roomCode = btn.getAttribute("data-delete-group");
         removeSavedGroup(roomCode);
-        setInfo("Sala removida da lista local.");
+        setInfo("Grupo removido da lista salva.");
       });
     });
   }
