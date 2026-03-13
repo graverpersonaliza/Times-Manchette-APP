@@ -87,7 +87,10 @@
       adminPassStored: "",
       developerRooms: [],
       developerRoomsError: "",
-      developerFilter: ""
+      developerFilter: "",
+      roomGroups: {},
+      activeInternalGroupId: "",
+      activeInternalGroupName: ""
     };
 
     let db = null;
@@ -284,6 +287,15 @@ function safeBoldInfo(s){
     function getSavedGroups(){
       return loadGroups().sort((a,b)=>(Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0)));
     }
+
+    function roomGroupsArray(){
+      const obj = state.roomGroups || {};
+      return Object.values(obj).sort((a,b)=>(Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0)));
+    }
+
+    function activeInternalGroupLabel(){
+      return String(state.activeInternalGroupName || '').trim();
+    }
     function normalizePlan(value){
       const v = String(value || "free").trim().toLowerCase();
       return ["free","basico","pro"].includes(v) ? v : "free";
@@ -385,16 +397,6 @@ function safeBoldInfo(s){
     function rememberCurrentGroup(silent=false){
       const code = normalizeRoomCode(state.code);
       if(!code) return false;
-      const groups = loadGroups();
-      const alreadyExists = groups.some(g => normalizeRoomCode(g.code) === code);
-      const maxGroups = maxGroupsForPlan();
-
-      if(!alreadyExists && groups.length >= maxGroups){
-        if(!silent) setInfo(`Seu plano ${planLabel()} permite salvar até ${maxGroups} grupo(s). Faça upgrade para liberar mais grupos.`);
-        else render();
-        return false;
-      }
-
       upsertSavedGroup({
         code,
         roomName: state.roomName || "",
@@ -404,9 +406,102 @@ function safeBoldInfo(s){
         themeColor: state.themeColor || "#2563eb",
         updatedAtMs: nowMs()
       });
-      if(!silent) setInfo("Grupo salvo para acesso rápido.");
+      if(!silent) setInfo("Sala salva para acesso rápido.");
       else render();
       return true;
+    }
+
+    async function saveCurrentInternalGroup(){
+      const code = normalizeRoomCode(state.code);
+      if(!code) return false;
+      if(!session.admin && !session.developer){
+        setInfo('Somente Admin ou Desenvolvedor podem salvar grupos internos.');
+        return false;
+      }
+      const existing = roomGroupsArray();
+      const limit = maxGroupsForPlan();
+      const suggested = activeInternalGroupLabel() || state.roomSubtitle || '';
+      const name = String(prompt('Nome deste grupo interno', suggested) || '').trim();
+      if(!name) return false;
+      const id = genCode(8);
+      if(existing.length >= limit){
+        setInfo(`Seu plano ${planLabel()} permite até ${limit} grupo(s) dentro desta sala. Faça upgrade para liberar mais.`);
+        return false;
+      }
+      const roomGroups = Object.assign({}, state.roomGroups || {});
+      roomGroups[id] = {
+        id,
+        name,
+        roomName: String(state.roomName || '').trim(),
+        roomSubtitle: String(state.roomSubtitle || '').trim(),
+        team1Name: String(state.team1Name || 'Time 1').trim() || 'Time 1',
+        team2Name: String(state.team2Name || 'Time 2').trim() || 'Time 2',
+        themeColor: String(state.themeColor || '#2563eb').trim() || '#2563eb',
+        updatedAtMs: nowMs(),
+        updatedAt: nowIso()
+      };
+      try{
+        await metaUpdate(code, {
+          roomGroups,
+          activeInternalGroupId: id,
+          activeInternalGroupName: name
+        });
+        setInfo(`Grupo interno "${name}" salvo nesta sala.`);
+        return true;
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || 'Erro ao salvar grupo interno.'));
+        return false;
+      }
+    }
+
+    async function openInternalGroup(groupId){
+      const code = normalizeRoomCode(state.code);
+      const id = String(groupId || '').trim();
+      const group = state.roomGroups && state.roomGroups[id];
+      if(!code || !group) return false;
+      try{
+        await metaUpdate(code, {
+          roomName: String(group.roomName || state.roomName || '').trim() || 'Manchette Volleyball',
+          roomSubtitle: String(group.roomSubtitle || '').trim(),
+          team1Name: String(group.team1Name || 'Time 1').trim() || 'Time 1',
+          team2Name: String(group.team2Name || 'Time 2').trim() || 'Time 2',
+          themeColor: String(group.themeColor || '#2563eb').trim() || '#2563eb',
+          activeInternalGroupId: id,
+          activeInternalGroupName: String(group.name || '').trim()
+        });
+        setInfo(`Grupo interno "${group.name || id}" carregado.`);
+        return true;
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || 'Erro ao abrir grupo interno.'));
+        return false;
+      }
+    }
+
+    async function deleteInternalGroup(groupId){
+      const code = normalizeRoomCode(state.code);
+      const id = String(groupId || '').trim();
+      const group = state.roomGroups && state.roomGroups[id];
+      if(!code || !group) return false;
+      if(!session.admin && !session.developer){
+        setInfo('Somente Admin ou Desenvolvedor podem excluir grupos internos.');
+        return false;
+      }
+      if(!confirm(`Excluir o grupo interno "${group.name || id}" desta sala?`)) return false;
+      const roomGroups = Object.assign({}, state.roomGroups || {});
+      delete roomGroups[id];
+      const patch = { roomGroups };
+      if(String(state.activeInternalGroupId || '') === id){
+        patch.activeInternalGroupId = '';
+        patch.activeInternalGroupName = '';
+      }
+      try{
+        await metaUpdate(code, patch);
+        setInfo(`Grupo interno "${group.name || id}" removido.`);
+        return true;
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || 'Erro ao excluir grupo interno.'));
+        return false;
+      }
     }
 
     function buildRoomUrl(code){
@@ -1054,6 +1149,9 @@ async function ensureMeLoaded(){
         state.paidUntil = d && d.paidUntil ? toDateInput(d.paidUntil) : "";
         state.clientNotes = d && d.clientNotes ? String(d.clientNotes) : "";
         state.adminPassStored = d && d.adminPass ? String(d.adminPass) : "";
+        state.roomGroups = d && d.roomGroups && typeof d.roomGroups === 'object' ? d.roomGroups : {};
+        state.activeInternalGroupId = d && d.activeInternalGroupId ? String(d.activeInternalGroupId) : "";
+        state.activeInternalGroupName = d && d.activeInternalGroupName ? String(d.activeInternalGroupName) : "";
 
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
         const nextAt = d && d.activeRoundAtMs ? Number(d.activeRoundAtMs) : 0;
@@ -1883,6 +1981,9 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       state.open = true;
       state.syncError = "";
       state.info = "";
+      state.roomGroups = {};
+      state.activeInternalGroupId = "";
+      state.activeInternalGroupName = "";
       render();
     }
 
@@ -2719,8 +2820,8 @@ function openWhatsApp(text, numberDigits){
         <div class="mt-5 rounded-2xl border bg-gray-50 p-4">
           <div class="flex items-center justify-between gap-2">
             <div>
-              <h3 class="font-bold text-gray-800">Múltiplos grupos</h3>
-              <p class="text-xs text-gray-500">Salve seus grupos para entrar com um toque.</p>
+              <h3 class="font-bold text-gray-800">Salas recentes</h3>
+              <p class="text-xs text-gray-500">Salas que você usou recentemente para entrar com um toque.</p>
             </div>
             <span class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? '∞' : groupsLimit} grupo(s)</span>
           </div>
@@ -2741,7 +2842,7 @@ function openWhatsApp(text, numberDigits){
               `).join('')}
             </div>
           ` : `
-            <div class="mt-3 text-sm text-gray-500">Nenhum grupo salvo ainda. Entre em uma sala e clique em <b>Salvar este grupo</b>.</div>
+            <div class="mt-3 text-sm text-gray-500">Nenhuma sala recente ainda. Entre em uma sala e ela ficará salva aqui para acesso rápido.</div>
           `}
           ${!featureAllowed('multiGroups') ? `<div class="mt-3">${premiumLockCard('Múltiplos grupos', 'No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.', 'múltiplos grupos')}</div>` : ``}
         </div>
@@ -3079,17 +3180,32 @@ function openWhatsApp(text, numberDigits){
                 ` : ``}
 
                 <div class="border-t pt-3">
-                  <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Múltiplos grupos</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${allSavedGroupsCount}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
+                  <div class="flex items-center justify-between gap-2 mb-2"><h3 class="font-semibold">Múltiplos grupos da mesma sala</h3><span class="text-[11px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">${roomGroupsArray().length}/${groupsLimit >= 999 ? "∞" : groupsLimit}</span></div>
                   <div class="rounded-xl border p-3 bg-gray-50">
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-sm text-gray-700">
-                        <div class="font-semibold">${escapeHtml(roomDisplayName)}</div>
-                        <div class="text-xs text-gray-500">Sala ${escapeHtml(code)}</div>
+                        <div class="font-semibold">${activeInternalGroupLabel() ? escapeHtml(activeInternalGroupLabel()) : 'Grupo atual sem nome salvo'}</div>
+                        <div class="text-xs text-gray-500">Todos os grupos abaixo pertencem à sala ${escapeHtml(code)}.</div>
                       </div>
-                      <button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar este grupo</button>
+                      ${session.admin ? `<button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar grupo atual</button>` : ``}
                     </div>
-                    <div class="mt-2 text-xs text-gray-500">Os outros grupos salvos aparecem somente fora da sala, na tela inicial.</div>
-                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos", "O plano Free salva 1 grupo. Faça upgrade para liberar 3 grupos no Básico ou grupos ilimitados no PRO.", "múltiplos grupos")}</div>` : ``}
+                    <div class="mt-2 text-xs text-gray-500">Use grupos internos para criar variações dentro da mesma sala, sem gerar novas salas.</div>
+                    ${roomGroupsArray().length ? `
+                      <div class="mt-3 space-y-2">
+                        ${roomGroupsArray().map(g => `
+                          <div class="rounded-xl border bg-white p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${String(g.id||'')===String(state.activeInternalGroupId||'') ? 'border-indigo-300 ring-1 ring-indigo-200' : ''}">
+                            <div>
+                              <div class="font-semibold text-gray-800">${escapeHtml(g.name || ('Grupo ' + g.id))}</div>
+                              <div class="text-xs text-gray-500">${g.roomSubtitle ? escapeHtml(g.roomSubtitle) + ' · ' : ''}Atualizado em ${escapeHtml(fmtBR(g.updatedAtMs || g.updatedAt || ''))}</div>
+                            </div>
+                            <div class="flex flex-wrap gap-2">
+                              ${session.admin ? `<button data-open-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir grupo</button><button data-delete-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir grupo</button>` : `<span class="text-xs text-gray-500">Apenas Admin/Desenvolvedor gerenciam grupos internos.</span>`}
+                            </div>
+                          </div>
+                        `).join('')}
+                      </div>
+                    ` : `<div class="mt-3 text-sm text-gray-500">Nenhum grupo interno salvo nesta sala ainda.</div>`}
+                    ${!featureAllowed("multiGroups") ? `<div class="mt-3">${premiumLockCard("Mais grupos internos", "No plano Free você salva 1 grupo interno. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.", "múltiplos grupos internos")}</div>` : ``}
                   </div>
                 </div>
 
@@ -3382,7 +3498,19 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnSort")) $("btnSort").onclick = ()=> randomizeTeams();
         if($("btnReset")) $("btnReset").onclick = ()=> resetCurrentRoom();
 
-        if($("btnSaveGroup")) $("btnSaveGroup").onclick = ()=> rememberCurrentGroup();
+        if($("btnSaveGroup")) $("btnSaveGroup").onclick = ()=> saveCurrentInternalGroup();
+        document.querySelectorAll("[data-open-internal-group]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const id = btn.getAttribute("data-open-internal-group");
+            openInternalGroup(id);
+          });
+        });
+        document.querySelectorAll("[data-delete-internal-group]").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const id = btn.getAttribute("data-delete-internal-group");
+            deleteInternalGroup(id);
+          });
+        });
         if($("btnCopyReport")) $("btnCopyReport").onclick = ()=> copyManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnWAReport")) $("btnWAReport").onclick = ()=> whatsManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
         if($("btnDownloadReport")) $("btnDownloadReport").onclick = ()=> downloadManagementReport(playersArr, presentPlayers, waiting, team1, team2, byTarget);
