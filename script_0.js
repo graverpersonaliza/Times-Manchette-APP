@@ -3185,11 +3185,11 @@ function openWhatsApp(text, numberDigits){
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-sm text-gray-700">
                         <div class="font-semibold">${activeInternalGroupLabel() ? escapeHtml(activeInternalGroupLabel()) : 'Grupo atual sem nome salvo'}</div>
-                        <div class="text-xs text-gray-500">Todos os grupos abaixo pertencem à sala ${escapeHtml(code)}.</div>
+                        <div class="text-xs text-gray-500">Crie variações dentro desta sala.</div>
                       </div>
                       ${session.admin ? `<button id="btnSaveGroup" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Salvar grupo atual</button>` : ``}
                     </div>
-                    <div class="mt-2 text-xs text-gray-500">Use grupos internos para criar variações dentro da mesma sala, sem gerar novas salas.</div>
+                    
                     ${roomGroupsArray().length ? `
                       <div class="mt-3 space-y-2">
                         ${roomGroupsArray().map(g => `
@@ -3199,7 +3199,7 @@ function openWhatsApp(text, numberDigits){
                               <div class="text-xs text-gray-500">${g.roomSubtitle ? escapeHtml(g.roomSubtitle) + ' · ' : ''}Atualizado em ${escapeHtml(fmtBR(g.updatedAtMs || g.updatedAt || ''))}</div>
                             </div>
                             <div class="flex flex-wrap gap-2">
-                              ${session.admin ? `<button data-open-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir grupo</button><button data-delete-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir grupo</button>` : `<span class="text-xs text-gray-500">Apenas Admin/Desenvolvedor gerenciam grupos internos.</span>`}
+                              ${session.admin ? `<button data-open-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-semibold">Abrir grupo</button><button data-delete-internal-group="${escapeHtml(g.id)}" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Excluir grupo</button>` : ``}
                             </div>
                           </div>
                         `).join('')}
@@ -3275,11 +3275,7 @@ function openWhatsApp(text, numberDigits){
                         </div>
                       `}
                     </div>
-                  ` : `
-                    <div class="rounded-xl border bg-gray-50 p-3 text-sm text-gray-600">
-                      Os acessos <b>Admin</b> e <b>Desenvolvedor</b> agora são escolhidos na tela inicial antes de entrar na sala.
-                    </div>
-                  `}
+                  ` : ``}
                 </div>
               </div>
 
