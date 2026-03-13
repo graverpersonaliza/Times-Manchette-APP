@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-dev-fix19";
+const CACHE_NAME = "manchette-dev-fix20";
 const ASSETS = [
   "./",
   "./index.html",
