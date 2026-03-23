@@ -20,6 +20,7 @@
     const LS_GROUPS = "vb_groups_v1";
     const LS_NOTIFY_PREF = "vb_notify_pref_v1";
     const LS_DEVICE_ID = "vb_device_id_v1";
+    const LS_ROOM_PLAYER_MAP = "vb_room_player_map_v1";
 
     const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
 
@@ -159,6 +160,7 @@ async function claimPlayerByAccessCode(){
     const doc = qs.docs[0];
     const d = doc.data() || {};
     session.playerId = doc.id;
+    rememberPlayerForRoom(code, doc.id);
     persistSession();
     if($("accessCodeInput")) $("accessCodeInput").value = "";
     setInfo(`Inscrição recuperada: ${d.name || "Jogador"}.`);
@@ -219,6 +221,27 @@ function safeBoldInfo(s){
       const deviceId = getDeviceId();
       if(!deviceId) return null;
       return Object.values(playersObj || {}).find(p => p && String(p.deviceId || "") === deviceId) || null;
+    }
+    function loadRoomPlayerMap(){
+      const raw = load(LS_ROOM_PLAYER_MAP, {});
+      return raw && typeof raw === "object" ? raw : {};
+    }
+    function getRememberedPlayerIdForRoom(code){
+      const c = normalizeRoomCode(code);
+      if(!c) return "";
+      const map = loadRoomPlayerMap();
+      return String(map[c] || "");
+    }
+    function rememberPlayerForRoom(code, playerId){
+      const c = normalizeRoomCode(code);
+      if(!c) return;
+      const map = loadRoomPlayerMap();
+      if(playerId) map[c] = String(playerId);
+      else delete map[c];
+      save(LS_ROOM_PLAYER_MAP, map);
+    }
+    function forgetPlayerForRoom(code){
+      rememberPlayerForRoom(code, "");
     }
     function persistSession(){
       save(LS_SESSION, session);
@@ -2149,6 +2172,9 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       await deleteRatingsWhere("raterId", playerId);
       await deleteRatingsWhere("targetId", playerId);
 
+      if(normalizeRoomCode(state.code) === c && String(session.playerId||"") === String(playerId||"")){
+        forgetPlayerForRoom(c);
+      }
       await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
     }
 
@@ -2254,6 +2280,10 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
           session.playerId = "";
           session.prevPlayerId = "";
         }
+        if(mode === "player" && !session.prevPlayerId && !session.playerId){
+          const rememberedId = getRememberedPlayerIdForRoom(code);
+          if(rememberedId) session.playerId = rememberedId;
+        }
         persistSession();
         syncRoomUrl(code);
         attachRoom(code);
@@ -2262,7 +2292,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
           ? "<b>Entrou na sala como Desenvolvedor.</b> Você tem visão e controle avançado desta sala."
           : mode === "admin"
             ? "<b>Entrou na sala como Admin.</b> Os controles administrativos já estão liberados."
-            : "<b>Entrou na sala.</b> Agora inscreva seu nome ou entre com seu Código do Jogador.";
+            : "<b>Entrou na sala.</b> Entre com seu Código do Jogador ou faça a inscrição se for um novo jogador.";
         setInfo(entryMsg);
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -2357,6 +2387,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         if(!addingAnother) player.deviceId = getDeviceId();
 
         session.playerId = id;
+        rememberPlayerForRoom(code, id);
         persistSession();
 
         await setPlayer(code, player);
@@ -2426,6 +2457,7 @@ async function registerMeSendWhatsApp(){
     if(!addingAnother) player.deviceId = getDeviceId();
 
     session.playerId = id;
+    rememberPlayerForRoom(code, id);
     persistSession();
 
     await setPlayer(code, player);
@@ -2493,6 +2525,7 @@ function backToPrevPlayer(){
   if(!session.prevPlayerId) return;
   session.playerId = session.prevPlayerId;
   session.prevPlayerId = "";
+  rememberPlayerForRoom(state.code, session.playerId);
   persistSession();
   // Reanexa listeners para garantir que times/presença não "sumam" ao trocar de jogador
   if(state.code) attachRoom(state.code);
@@ -2501,9 +2534,14 @@ function backToPrevPlayer(){
 }
 
 function recoverMyAccessFromDevice(){
-  const found = findRegisteredPlayerForThisDevice(state.players || {});
+  let found = findRegisteredPlayerForThisDevice(state.players || {});
+  if(!found || !found.id){
+    const rememberedId = getRememberedPlayerIdForRoom(state.code);
+    if(rememberedId && state.players && state.players[rememberedId]) found = state.players[rememberedId];
+  }
   if(!found || !found.id) return alert("Não encontrei uma inscrição deste aparelho nesta sala.");
   session.playerId = found.id;
+  rememberPlayerForRoom(state.code, found.id);
   persistSession();
   setInfo(`Acesso recuperado para <b>${escapeHtml(found.name || "Jogador")}</b>.`);
   render();
@@ -2521,10 +2559,11 @@ async function markPresence(present){
       if(!state.open) return alert("Inscrição fechada.");
 
       try{
+        rememberPlayerForRoom(code, m.id);
         await setAttendance(code, state.activeRoundId, m.id, {
           present: !!present,
           team: present ? teamOf(m.id) : null,
-          checkedInAtMs: present ? nowMs() : null,
+          checkedInAtMs: present ? ((state.attendance && state.attendance[m.id] && state.attendance[m.id].checkedInAtMs) || nowMs()) : null,
           updatedAt: nowIso()
         });
         setInfo(present ? "<b>Presença confirmada.</b>" : "Ausência marcada para esta rodada.");
@@ -2541,6 +2580,7 @@ async function markPresence(present){
       try{
         await removePlayerAndRelatedRatings(code, m.id);
         session.playerId = "";
+        forgetPlayerForRoom(code);
         persistSession();
         setInfo("Você saiu da lista.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
@@ -2596,7 +2636,12 @@ async function markPresence(present){
           if(!ok) return;
         }
 
-        await setAttendance(state.code, state.activeRoundId, m.id, { team });
+        await setAttendance(state.code, state.activeRoundId, m.id, {
+          present: true,
+          team,
+          checkedInAtMs: (state.attendance && state.attendance[m.id] && state.attendance[m.id].checkedInAtMs) || nowMs(),
+          updatedAt: nowIso()
+        });
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -3234,7 +3279,8 @@ function openWhatsApp(text, numberDigits){
 
     function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, mySelfRated, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
       const hasPlayerSession = accessMode() === "player" && !!session.playerId;
-      const deviceRegistered = accessMode() === "player" && !!findRegisteredPlayerForThisDevice(state.players || {});
+      const rememberedPlayerId = getRememberedPlayerIdForRoom(state.code);
+      const deviceRegistered = accessMode() === "player" && (!!findRegisteredPlayerForThisDevice(state.players || {}) || !!rememberedPlayerId);
 
       if((hasPlayerSession || deviceRegistered) && !meObj){
         return `
