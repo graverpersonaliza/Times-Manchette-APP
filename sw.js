@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-dev-fix28-reinscricao-times";
+const CACHE_NAME = "manchette-dev-fix29-lock-login-time";
 const ASSETS = [
   "./",
   "./index.html",
