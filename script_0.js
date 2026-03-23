@@ -1066,13 +1066,64 @@ async function ensureMeLoaded(){
 function autoRestorePlayerSessionFromDevice(forceInfo = false){
   if(accessMode() !== "player") return null;
   if(session.playerId || session.prevPlayerId) return null;
-  const found = findRegisteredPlayerForThisDevice(state.players || {});
+  const rememberedId = getRememberedPlayerIdForRoom(state.code);
+  let found = null;
+  if(rememberedId && state.players && state.players[rememberedId]) found = state.players[rememberedId];
+  if(!found) found = findRegisteredPlayerForThisDevice(state.players || {});
   if(found && found.id){
     session.playerId = found.id;
+    rememberPlayerForRoom(state.code, found.id);
     persistSession();
     if(forceInfo) state.info = `Acesso recuperado para <b>${escapeHtml(found.name || "Jogador")}</b>.`;
     return found;
   }
+  return null;
+}
+
+async function resolveExistingRegistrationForThisDevice(code){
+  const roomCode = normalizeRoomCode(code || state.code);
+  if(!roomCode) return null;
+
+  const rememberedId = getRememberedPlayerIdForRoom(roomCode);
+  if(rememberedId){
+    if(state.players && state.players[rememberedId]){
+      return state.players[rememberedId];
+    }
+    if(db){
+      try{
+        const snap = await playersCol(roomCode).doc(rememberedId).get();
+        if(snap.exists){
+          const data = snap.data() || {};
+          state.players[rememberedId] = data;
+          rememberPlayerForRoom(roomCode, rememberedId);
+          return data;
+        } else {
+          forgetPlayerForRoom(roomCode);
+        }
+      }catch(e){}
+    }
+  }
+
+  const sameDevice = findRegisteredPlayerForThisDevice(state.players || {});
+  if(sameDevice && sameDevice.id){
+    rememberPlayerForRoom(roomCode, sameDevice.id);
+    return sameDevice;
+  }
+
+  const deviceId = getDeviceId();
+  if(deviceId && db){
+    try{
+      const qs = await playersCol(roomCode).where("deviceId", "==", deviceId).limit(1).get();
+      if(qs && !qs.empty){
+        const doc = qs.docs[0];
+        const data = doc.data() || {};
+        state.players[doc.id] = data;
+        rememberPlayerForRoom(roomCode, doc.id);
+        return data;
+      }
+    }catch(e){}
+  }
+
   return null;
 }
 
@@ -2364,12 +2415,13 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         }
 
         if(!addingAnother){
-          const sameDevicePlayer = findRegisteredPlayerForThisDevice(state.players || {});
-          if(sameDevicePlayer && sameDevicePlayer.id){
-            session.playerId = sameDevicePlayer.id;
+          const sameRegistration = await resolveExistingRegistrationForThisDevice(code);
+          if(sameRegistration && sameRegistration.id){
+            session.playerId = sameRegistration.id;
+            rememberPlayerForRoom(code, sameRegistration.id);
             persistSession();
             render();
-            return alert("Este celular já possui uma inscrição nesta sala. Use essa mesma inscrição ou peça para o Admin remover você da lista antes de se cadastrar novamente.");
+            return alert("Este celular já possui uma inscrição nesta sala. Recupere esse acesso. Para inscrever outra pessoa, entre primeiro no seu jogador e use 'Adicionar jogador'.");
           }
         }
 
@@ -2432,13 +2484,14 @@ async function registerMeSendWhatsApp(){
 
     const addingAnother = !!session.prevPlayerId;
     if(!addingAnother){
-      const sameDevicePlayer = findRegisteredPlayerForThisDevice(state.players || {});
-      if(sameDevicePlayer && sameDevicePlayer.id){
-        session.playerId = sameDevicePlayer.id;
+      const sameRegistration = await resolveExistingRegistrationForThisDevice(code);
+      if(sameRegistration && sameRegistration.id){
+        session.playerId = sameRegistration.id;
+        rememberPlayerForRoom(code, sameRegistration.id);
         persistSession();
         render();
         if(pre) try{ pre.close(); }catch{}
-        return alert("Este celular já possui uma inscrição nesta sala. Use essa mesma inscrição ou peça para o Admin remover você da lista antes de se cadastrar novamente.");
+        return alert("Este celular já possui uma inscrição nesta sala. Recupere esse acesso. Para inscrever outra pessoa, entre primeiro no seu jogador e use 'Adicionar jogador'.");
       }
     }
 
@@ -2553,7 +2606,17 @@ async function markPresence(present){
       if(!code) return alert("Entre na sala primeiro (código da partida).");
       if(!m){
         m = await ensureMeLoaded();
-        if(!m) return alert("Sua inscrição ainda não carregou. Aguarde 1 segundo e tente novamente.");
+        if(!m){
+          const sameRegistration = await resolveExistingRegistrationForThisDevice(code);
+          if(sameRegistration && sameRegistration.id){
+            session.playerId = sameRegistration.id;
+            rememberPlayerForRoom(code, sameRegistration.id);
+            persistSession();
+            render();
+            return alert("Recupere seu acesso nesta sala antes de confirmar presença.");
+          }
+          return alert("Sua inscrição ainda não carregou. Aguarde 1 segundo e tente novamente.");
+        }
       }
       if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
       if(!state.open) return alert("Inscrição fechada.");
@@ -2590,7 +2653,17 @@ async function markPresence(present){
       try{
         let m = me();
         if(!m){ m = await ensureMeLoaded(); }
-        if(!m) return alert("Inscreva-se para escolher time.");
+        if(!m){
+          const sameRegistration = await resolveExistingRegistrationForThisDevice(state.code);
+          if(sameRegistration && sameRegistration.id){
+            session.playerId = sameRegistration.id;
+            rememberPlayerForRoom(state.code, sameRegistration.id);
+            persistSession();
+            render();
+            return alert("Recupere seu acesso nesta sala antes de escolher time.");
+          }
+          return alert("Inscreva-se para escolher time.");
+        }
         if(!state.open) return alert("Inscrição fechada.");
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
         if(!isPresent(m.id)) return alert("Confirme presença antes de escolher time.");
