@@ -19,6 +19,7 @@
     const LS_LAST_CODE = "vb_last_code_v3";
     const LS_GROUPS = "vb_groups_v1";
     const LS_NOTIFY_PREF = "vb_notify_pref_v1";
+    const LS_DEVICE_ID = "vb_device_id_v1";
 
     const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
 
@@ -205,6 +206,19 @@ function safeBoldInfo(s){
         const raw = localStorage.getItem(key);
         return raw ? JSON.parse(raw) : fallback;
       }catch{ return fallback; }
+    }
+    function getDeviceId(){
+      let id = load(LS_DEVICE_ID, "");
+      if(!id){
+        id = safeId();
+        save(LS_DEVICE_ID, id);
+      }
+      return String(id || "");
+    }
+    function findRegisteredPlayerForThisDevice(playersObj = state.players || {}){
+      const deviceId = getDeviceId();
+      if(!deviceId) return null;
+      return Object.values(playersObj || {}).find(p => p && String(p.deviceId || "") === deviceId) || null;
     }
     function persistSession(){
       save(LS_SESSION, session);
@@ -1026,6 +1040,18 @@ async function ensureMeLoaded(){
   return null;
 }
 
+function autoRestorePlayerSessionFromDevice(forceInfo = false){
+  if(accessMode() !== "player") return null;
+  if(session.playerId || session.prevPlayerId) return null;
+  const found = findRegisteredPlayerForThisDevice(state.players || {});
+  if(found && found.id){
+    session.playerId = found.id;
+    persistSession();
+    if(forceInfo) state.info = `Acesso recuperado para <b>${escapeHtml(found.name || "Jogador")}</b>.`;
+    return found;
+  }
+  return null;
+}
 
     function isPresent(playerId){
       const a = state.attendance && state.attendance[playerId];
@@ -1423,6 +1449,7 @@ async function ensureMeLoaded(){
         qs.forEach(doc=> obj[doc.id] = doc.data());
         maybeNotifyPlayersSnapshot(obj);
         state.players = obj;
+        autoRestorePlayerSessionFromDevice(false);
         state.attendance = rebuildAttendanceFromPlayers(state.attendance);
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
@@ -2284,10 +2311,22 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         if(!code) return;
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
 
+        const addingAnother = !!session.prevPlayerId;
+
         // Bloqueia nova inscrição quando já está logado neste aparelho
         const already = me();
         if(already){
           return alert("Você já está logado. Para mudar seus dados use 'Atualizar minha inscrição' ou 'Sair da lista'. Para inscrever outra pessoa, use 'Adicionar jogador'.");
+        }
+
+        if(!addingAnother){
+          const sameDevicePlayer = findRegisteredPlayerForThisDevice(state.players || {});
+          if(sameDevicePlayer && sameDevicePlayer.id){
+            session.playerId = sameDevicePlayer.id;
+            persistSession();
+            render();
+            return alert("Este celular já possui uma inscrição nesta sala. Use essa mesma inscrição ou peça para o Admin remover você da lista antes de se cadastrar novamente.");
+          }
         }
 
         const name = ($("playerName")?.value || "").trim();
@@ -2301,6 +2340,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         const accessCode = genPlayerCode(10);
 
         const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
+        if(!addingAnother) player.deviceId = getDeviceId();
 
         session.playerId = id;
         persistSession();
@@ -2345,6 +2385,18 @@ async function registerMeSendWhatsApp(){
       return;
     }
 
+    const addingAnother = !!session.prevPlayerId;
+    if(!addingAnother){
+      const sameDevicePlayer = findRegisteredPlayerForThisDevice(state.players || {});
+      if(sameDevicePlayer && sameDevicePlayer.id){
+        session.playerId = sameDevicePlayer.id;
+        persistSession();
+        render();
+        if(pre) try{ pre.close(); }catch{}
+        return alert("Este celular já possui uma inscrição nesta sala. Use essa mesma inscrição ou peça para o Admin remover você da lista antes de se cadastrar novamente.");
+      }
+    }
+
     // ✅ Se NÃO está logado: cadastra e já abre WhatsApp
     const name = ($("playerName")?.value || "").trim();
     const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
@@ -2357,6 +2409,7 @@ async function registerMeSendWhatsApp(){
     const accessCode = genPlayerCode(10);
 
     const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
+    if(!addingAnother) player.deviceId = getDeviceId();
 
     session.playerId = id;
     persistSession();
@@ -2433,6 +2486,15 @@ function backToPrevPlayer(){
   render();
 }
 
+function recoverMyAccessFromDevice(){
+  const found = findRegisteredPlayerForThisDevice(state.players || {});
+  if(!found || !found.id) return alert("Não encontrei uma inscrição deste aparelho nesta sala.");
+  session.playerId = found.id;
+  persistSession();
+  setInfo(`Acesso recuperado para <b>${escapeHtml(found.name || "Jogador")}</b>.`);
+  render();
+}
+
 async function markPresence(present){
       const code = state.code;
       let m = me();
@@ -2447,11 +2509,11 @@ async function markPresence(present){
       try{
         await setAttendance(code, state.activeRoundId, m.id, {
           present: !!present,
-          team: null,
+          team: present ? teamOf(m.id) : null,
           checkedInAtMs: present ? nowMs() : null,
           updatedAt: nowIso()
         });
-        setInfo(present ? "<b>Presença confirmada. Agora escolha seu time</b>" : "Ausência marcada para esta rodada.");
+        setInfo(present ? "<b>Presença confirmada.</b>" : "Ausência marcada para esta rodada.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -3158,8 +3220,9 @@ function openWhatsApp(text, numberDigits){
 
     function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, mySelfRated, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
       const hasPlayerSession = accessMode() === "player" && !!session.playerId;
+      const deviceRegistered = accessMode() === "player" && !!findRegisteredPlayerForThisDevice(state.players || {});
 
-      if(hasPlayerSession && !meObj){
+      if((hasPlayerSession || deviceRegistered) && !meObj){
         return `
           <div class="rounded-xl border bg-blue-50 p-3">
             <div class="text-sm font-extrabold text-blue-800">Reconectando seu acesso</div>
@@ -3173,6 +3236,11 @@ function openWhatsApp(text, numberDigits){
 
       if(!meObj){
         return `
+          ${(!session.prevPlayerId && deviceRegistered) ? `
+            <div class="rounded-xl border bg-amber-50 p-3 text-sm text-amber-800">
+              Este celular já possui uma inscrição nesta sala. Use <b>Recuperar meu acesso</b> ou peça para o Admin remover sua inscrição antes de cadastrar novamente.
+            </div>
+          ` : ``}
           <div class="grid gap-2">
             <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
 
@@ -3193,11 +3261,11 @@ function openWhatsApp(text, numberDigits){
               </div>
             </div>
 
-            <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+            <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "disabled"}>
               Entrar na lista
             </button>
 
-            <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+            <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "disabled"}>
               📲 Enviar Inscrição
             </button>
           </div>
