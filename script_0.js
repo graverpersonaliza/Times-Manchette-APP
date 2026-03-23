@@ -18,6 +18,7 @@
     const LS_SESSION = "vb_session_v4";
     const LS_LAST_CODE = "vb_last_code_v3";
     const LS_GROUPS = "vb_groups_v1";
+    const LS_NOTIFY_PREF = "vb_notify_pref_v1";
 
     const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
 
@@ -95,6 +96,7 @@
 
     let db = null;
     let unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
+    let liveNotify = { roomCode:"", playersReady:false, attendanceReady:false, players:{}, attendance:{}, lastKey:"", lastAt:0 };
 
     // ===============================
     // Helpers
@@ -238,6 +240,156 @@ function safeBoldInfo(s){
       if(mode === "developer") return "Desenvolvedor";
       if(mode === "admin") return "Admin";
       return "Jogador";
+    }
+
+    function notificationsEnabled(){
+      return !!load(LS_NOTIFY_PREF, false);
+    }
+
+    function notificationStatusLabel(){
+      if(!("Notification" in window)) return "Seu navegador não suporta notificações do sistema.";
+      const permission = Notification.permission;
+      if(permission === "granted" && notificationsEnabled()) return "Notificações ativas para avisos da sala.";
+      if(permission === "denied") return "Notificações bloqueadas neste aparelho.";
+      return notificationsEnabled() ? "Permissão pendente no navegador." : "Ative para receber avisos no app instalado.";
+    }
+
+    function canReceiveLiveNotifications(){
+      return !!state.code && (session.admin || session.developer) && notificationsEnabled() && ("Notification" in window) && Notification.permission === "granted";
+    }
+
+    function resetLiveNotify(code = ""){
+      liveNotify = { roomCode: normalizeRoomCode(code), playersReady:false, attendanceReady:false, players:{}, attendance:{}, lastKey:"", lastAt:0 };
+    }
+
+    async function enableSystemNotifications(){
+      try{
+        if(!("Notification" in window)) return alert("Seu navegador não suporta notificações do sistema.");
+        let permission = Notification.permission;
+        if(permission !== "granted") permission = await Notification.requestPermission();
+        const allowed = permission === "granted";
+        save(LS_NOTIFY_PREF, allowed);
+        if(allowed){
+          await pushSystemNotification("Manchette Volleyball", "Notificações ativadas para inscrições, presença e escolha de time.", { force:true, tag:"notif-onboarding" });
+          setInfo("Notificações ativadas.");
+        }else{
+          setInfo("Notificações não foram liberadas neste aparelho.");
+        }
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao ativar notificações."));
+      }
+    }
+
+    function disableSystemNotifications(){
+      save(LS_NOTIFY_PREF, false);
+      setInfo("Notificações desativadas neste aparelho.");
+      render();
+    }
+
+    async function pushSystemNotification(title, body, opts = {}){
+      try{
+        if(!("Notification" in window)) return false;
+        if(Notification.permission !== "granted") return false;
+        if(!notificationsEnabled() && !opts.force) return false;
+        const key = `${title}|${body}`;
+        const now = Date.now();
+        if(!opts.force && liveNotify.lastKey === key && (now - liveNotify.lastAt) < 1800) return false;
+        liveNotify.lastKey = key;
+        liveNotify.lastAt = now;
+        const url = opts.url || buildRoomUrl(state.code || liveNotify.roomCode || "") || (location.origin + location.pathname);
+        const payload = {
+          body,
+          icon: "./icon-192.png",
+          badge: "./icon-192.png",
+          tag: opts.tag || `room-${normalizeRoomCode(state.code || liveNotify.roomCode || "geral")}-${now}`,
+          renotify: false,
+          data: { url }
+        };
+        if("serviceWorker" in navigator){
+          const reg = await navigator.serviceWorker.ready.catch(()=>null);
+          if(reg && reg.showNotification){
+            await reg.showNotification(title, payload);
+            return true;
+          }
+        }
+        new Notification(title, payload);
+        return true;
+      }catch(e){
+        console.warn("Falha ao mostrar notificação", e);
+        return false;
+      }
+    }
+
+    function queueRoomNotification(title, body, opts = {}){
+      if(!canReceiveLiveNotifications()) return;
+      pushSystemNotification(title, body, opts);
+    }
+
+    function playerNameById(playerId){
+      const p = (state.players && state.players[playerId]) || (liveNotify.players && liveNotify.players[playerId]) || {};
+      return String(p.name || "Jogador");
+    }
+
+    function maybeNotifyPlayersSnapshot(nextPlayers){
+      if(!state.code) {
+        liveNotify.players = nextPlayers || {};
+        liveNotify.playersReady = true;
+        return;
+      }
+      if(!liveNotify.playersReady || normalizeRoomCode(liveNotify.roomCode) !== normalizeRoomCode(state.code)){
+        liveNotify.roomCode = normalizeRoomCode(state.code);
+        liveNotify.playersReady = true;
+        liveNotify.players = nextPlayers || {};
+        return;
+      }
+      const prev = liveNotify.players || {};
+      const curr = nextPlayers || {};
+      Object.keys(curr).forEach((id)=>{
+        if(prev[id]) return;
+        const p = curr[id] || {};
+        const name = String(p.name || "Jogador");
+        queueRoomNotification("Nova inscrição", `${name} entrou na lista da sala ${normalizeRoomCode(state.code)}.`);
+      });
+      liveNotify.players = curr;
+    }
+
+    function maybeNotifyAttendanceSnapshot(nextAttendance){
+      if(!state.code) {
+        liveNotify.attendance = nextAttendance || {};
+        liveNotify.attendanceReady = true;
+        return;
+      }
+      if(!liveNotify.attendanceReady || normalizeRoomCode(liveNotify.roomCode) !== normalizeRoomCode(state.code)){
+        liveNotify.roomCode = normalizeRoomCode(state.code);
+        liveNotify.attendanceReady = true;
+        liveNotify.attendance = nextAttendance || {};
+        return;
+      }
+      const prev = liveNotify.attendance || {};
+      const curr = nextAttendance || {};
+      const ids = new Set([...Object.keys(prev), ...Object.keys(curr)]);
+      ids.forEach((id)=>{
+        const oldRow = prev[id] || null;
+        const newRow = curr[id] || null;
+        if(!newRow) return;
+        const name = playerNameById(id);
+        const wasKnownPlayer = !!((liveNotify.players || {})[id]);
+        if(oldRow && !oldRow.present && !!newRow.present){
+          queueRoomNotification("Presença confirmada", `${name} marcou presença na sala ${normalizeRoomCode(state.code)}.`);
+        }
+        if(oldRow && oldRow.present && !newRow.present){
+          queueRoomNotification("Presença removida", `${name} marcou ausência na sala ${normalizeRoomCode(state.code)}.`);
+        }
+        if(oldRow && oldRow.team !== newRow.team && (newRow.team === 1 || newRow.team === 2)){
+          const teamLabel = newRow.team === 1 ? (state.team1Name || "Time 1") : (state.team2Name || "Time 2");
+          queueRoomNotification("Time escolhido", `${name} escolheu ${teamLabel}.`);
+        }
+        if(!oldRow && !!newRow.present && wasKnownPlayer){
+          queueRoomNotification("Presença confirmada", `${name} marcou presença na sala ${normalizeRoomCode(state.code)}.`);
+        }
+      });
+      liveNotify.attendance = curr;
     }
 
     function canCreateRooms(){
@@ -1145,6 +1297,7 @@ async function ensureMeLoaded(){
       try{ unsub.ratings && unsub.ratings(); }catch{}
       try{ unsub.snapshots && unsub.snapshots(); }catch{}
       unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
+      resetLiveNotify("");
     }
 
     function attachAttendanceListener(code, roundId){
@@ -1156,6 +1309,7 @@ async function ensureMeLoaded(){
       unsub.attendance = attendanceCol(c, rid).onSnapshot((qs)=>{
         const obj = {};
         qs.forEach(doc=> obj[doc.id] = doc.data());
+        maybeNotifyAttendanceSnapshot(obj);
         state.attendance = obj;
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
@@ -1164,6 +1318,7 @@ async function ensureMeLoaded(){
     function attachRoom(code){
       const c = String(code||"").toUpperCase();
       detachRoom();
+      resetLiveNotify(c);
       setSyncError("");
 
       unsub.meta = matchDoc(c).onSnapshot((snap)=>{
@@ -1211,6 +1366,7 @@ async function ensureMeLoaded(){
       unsub.players = playersCol(c).onSnapshot((qs)=>{
         const obj = {};
         qs.forEach(doc=> obj[doc.id] = doc.data());
+        maybeNotifyPlayersSnapshot(obj);
         state.players = obj;
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
@@ -2002,6 +2158,26 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       return joinRoomByCode(code);
     }
 
+    async function pasteRoomCodeAndJoin(){
+      try{
+        if(!navigator.clipboard || !navigator.clipboard.readText){
+          return alert("Seu navegador não liberou a leitura da área de transferência. Cole o código manualmente no campo.");
+        }
+        const raw = await navigator.clipboard.readText();
+        const code = normalizeRoomCode(String(raw || "").replace(/\s+/g, ""));
+        if(!code) return alert("Nenhum código de sala foi encontrado na área de transferência.");
+        if($("roomCode")) $("roomCode").value = code;
+        return joinRoomByCode(code);
+      }catch(e){
+        const msg = e && e.message ? e.message : String(e || "Erro ao colar o código.");
+        if(/denied|notallowed|permission/i.test(msg)){
+          alert("O navegador bloqueou o acesso à área de transferência. Permita a leitura ou cole o código manualmente no campo.");
+          return;
+        }
+        setSyncError(msg);
+      }
+    }
+
     function leaveRoom(){
       detachRoom();
       session.code = "";
@@ -2022,6 +2198,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       state.roomGroups = {};
       state.activeInternalGroupId = "";
       state.activeInternalGroupName = "";
+      resetLiveNotify("");
       render();
     }
 
@@ -2845,7 +3022,10 @@ function openWhatsApp(text, numberDigits){
         </div>
 
         <div class="mt-6 grid gap-3 sm:grid-cols-3">
-          <input id="roomCode" placeholder="Código da partida (ex.: A2K9ZP)" class="px-3 py-2 rounded-lg border sm:col-span-2" />
+          <div class="flex gap-2 sm:col-span-2">
+            <input id="roomCode" placeholder="Código da partida (ex.: A2K9ZP)" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" class="flex-1 px-3 py-2 rounded-lg border" />
+            <button id="btnPasteJoin" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold whitespace-nowrap">Colar e entrar</button>
+          </div>
           <div class="flex gap-2">
             <button id="btnJoin" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">Entrar</button>
             <button id="btnCreate" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${canCreate ? '' : 'opacity-50 cursor-not-allowed'}" ${canCreate ? '' : 'disabled'}>Criar nova</button>
@@ -2888,6 +3068,185 @@ function openWhatsApp(text, numberDigits){
       `;
     }
 
+
+    function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
+      const hasPlayerSession = accessMode() === "player" && !!session.playerId;
+
+      if(hasPlayerSession && !meObj){
+        return `
+          <div class="rounded-xl border bg-blue-50 p-3">
+            <div class="text-sm font-extrabold text-blue-800">Reconectando seu acesso</div>
+            <div class="mt-1 text-xs text-blue-700">Este celular já tem uma inscrição salva nesta sala. Aguarde alguns segundos ou toque abaixo para recuperar agora.</div>
+            <button id="btnReconnectMe" class="mt-3 w-full px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
+              Recuperar meu acesso
+            </button>
+          </div>
+        `;
+      }
+
+      if(!meObj){
+        return `
+          <div class="grid gap-2">
+            <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
+
+            <div class="grid gap-1">
+              <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
+              <div class="grid grid-cols-2 gap-2">
+                <select id="playerNote" class="px-3 py-2 rounded-lg border">
+                  <option value="5" selected>Minha nota 5</option>
+                  <option value="6">Minha nota 6</option>
+                  <option value="7">Minha nota 7</option>
+                  <option value="8">Minha nota 8</option>
+                  <option value="9">Minha nota 9</option>
+                  <option value="10">Minha nota 10</option>
+                </select>
+                <select id="playerPos" class="px-3 py-2 rounded-lg border">
+                  ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
+                </select>
+              </div>
+            </div>
+
+            <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+              Entrar na lista
+            </button>
+
+            <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+              📲 Enviar Inscrição
+            </button>
+          </div>
+
+          ${session.prevPlayerId ? `
+            <button id="btnBackToMe" class="mt-3 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+              Voltar para meu jogador
+            </button>
+          ` : ``}
+
+          <div class="mt-3 rounded-xl border bg-gray-50 p-3">
+            <div class="text-sm font-extrabold text-gray-800">Já se inscreveu?</div>
+            <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar sua inscrição neste aparelho.</div>
+            <div class="mt-2 flex gap-2">
+              <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
+              <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
+            </div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Dica: ao se inscrever, anote seu Código do Jogador.</div>
+        `;
+      }
+
+      return `
+        <div class="text-xs text-gray-600">Você já está logado. Para inscrever outra pessoa, use <b>Adicionar jogador</b>.</div>
+
+        <div class="text-sm text-gray-700">
+          Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
+          ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
+          ${myTeam ? ` · Time ${myTeam}` : ``}
+        </div>
+
+        <div class="mt-2 flex gap-2">
+          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
+            Confirmar presença
+          </button>
+          <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
+            Marcar ausência
+          </button>
+        </div>
+
+        <div class="mt-2 grid grid-cols-2 gap-2">
+          <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
+            Adicionar jogador
+          </button>
+          ${session.prevPlayerId ? `
+            <button id="btnBackToMe2" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+              Voltar para meu jogador
+            </button>
+          ` : `
+            <button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>
+              Voltar para meu jogador
+            </button>
+          `}
+        </div>
+
+        <div class="mt-1 text-xs text-gray-600">
+          Dica: use <b>Adicionar jogador</b> para inscrever alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
+        </div>
+
+        <div class="border-t pt-3">
+          <div class="grid gap-2">
+            <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
+              🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
+            </div>
+
+            <div class="flex flex-wrap gap-2">
+              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
+              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
+            </div>
+
+            <div class="text-xs text-gray-600">
+              Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no ${escapeHtml((state.team1Name||"Time 1"))} ·
+              <span class="font-semibold text-orange-700">${remaining2}</span> no ${escapeHtml((state.team2Name||"Time 2"))} ·
+              <span class="font-semibold">${waiting.length}</span> em espera
+            </div>
+
+            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">Avaliar jogadores</button>
+          </div>
+
+          ${bMsg.text ? `
+            <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
+              <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
+            </div>
+          ` : ``}
+        </div>
+
+        <div class="mt-3 rounded-xl border bg-white p-3">
+          <div class="text-sm font-extrabold text-gray-800">Atualizar minha inscrição</div>
+          <div class="mt-2">
+            <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
+          </div>
+          <div class="mt-2 grid grid-cols-2 gap-2">
+            <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
+              ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
+            </select>
+            <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
+              ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"Coringa")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
+            </select>
+          </div>
+          <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
+            Salvar inscrição
+          </button>
+          <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
+        </div>
+
+        <div class="mt-3 rounded-xl border bg-white p-3">
+          <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
+          <div class="mt-1 text-xs text-gray-500">Use este código para entrar na mesma inscrição em outro celular/PC.</div>
+          <div class="mt-2 flex items-center gap-2">
+            <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
+              ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
+            </div>
+            <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
+              Copiar
+            </button>
+          </div>
+          ${!meObj.accessCode ? `
+            <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
+              Gerar meu código
+            </button>
+          ` : ``}
+        </div>
+
+        <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
+          Sair da lista
+        </button>
+
+        ${myPresent ? `` : `
+          <div class="mt-2 text-sm text-gray-600">
+            Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
+          </div>
+        `}
+      `;
+    }
+
+
     function render(){
       const app = $("app");
       const code = (state.code || "").toUpperCase();
@@ -2922,6 +3281,7 @@ function openWhatsApp(text, numberDigits){
       const myNote = meObj ? computedNote(meObj, byTarget).toFixed(1) : "";
       const myPresent = meObj ? isPresent(meObj.id) : false;
       const myTeam = meObj ? teamOf(meObj.id) : null;
+      const hasPlayerSession = accessMode() === "player" && !!session.playerId;
 
       const presentPlayers = playersArr.filter(p=> isPresent(p.id));
       const team1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1);
@@ -3003,167 +3363,7 @@ function openWhatsApp(text, numberDigits){
                   ${openBadge}
                 </div>
 
-                <div class="grid gap-2">
-                  <input id="playerName" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"} placeholder="Seu nome" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" />
-
-                  <div class="grid gap-1">
-                    <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
-                    <div class="grid grid-cols-2 gap-2">
-                      <select id="playerNote" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>
-                        <option value="5" selected>Minha nota 5</option>
-                        <option value="6">Minha nota 6</option>
-                        <option value="7">Minha nota 7</option>
-                        <option value="8">Minha nota 8</option>
-                        <option value="9">Minha nota 9</option>
-                        <option value="10">Minha nota 10</option>
-                      </select>
-                      <select id="playerPos" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>
-                        ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
-                      </select>
-                    </div>
-                  </div>
-<button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(!meObj && state.open) ? "" : "opacity-50 cursor-not-allowed"}" ${(!meObj && state.open) ? "" : "disabled"}>
-                    Entrar na lista
-                  </button>
-
-<button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${((!meObj && state.open) || meObj) ? "" : "opacity-50 cursor-not-allowed"}" ${((!meObj && state.open) || meObj) ? "" : "disabled"}>
-  ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}
-</button>
-
-
-                  ${meObj ? `
-                    <div class="text-xs text-gray-600">Você já está logado. Para inscrever outra pessoa, use <b>Adicionar jogador</b>.</div>
-
-                    <div class="text-sm text-gray-700">
-                      Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
-                      ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
-                      ${myTeam ? ` · Time ${myTeam}` : ``}
-                    </div>
-<div class="mt-2 flex gap-2">
-  <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
-    Confirmar presença
-  </button>
-  <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
-    Marcar ausência
-  </button>
-</div>
-
-<div class="mt-2 grid grid-cols-2 gap-2">
-  <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
-    Adicionar jogador
-  </button>
-  ${session.prevPlayerId ? `
-    <button id="btnBackToMe2" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
-      Voltar para meu jogador
-    </button>
-  ` : `
-    <button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>
-      Voltar para meu jogador
-    </button>
-  `}
-</div>
-
-<div class="mt-1 text-xs text-gray-600">
-  Dica: use <b>Adicionar jogador</b> para inscrever alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
-</div>
-
-                    <div class="border-t pt-3">
-                  <div class="grid gap-2">
-                                          <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
-                                            🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
-                                          </div>
-                    
-
-                    <div class="flex flex-wrap gap-2">
-                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
-                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
-                    </div>
-
-                    <div class="text-xs text-gray-600">
-                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
-                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
-                      <span class="font-semibold">${waiting.length}</span> em espera
-                    </div>
-
-                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>Avaliar jogadores</button>
-                  </div>
-
-                  ${bMsg.text ? `
-                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
-                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
-                    </div>
-                  ` : ``}
-                </div>
-
-<div class="mt-3 rounded-xl border bg-white p-3">
-                      <div class="text-sm font-extrabold text-gray-800">Atualizar minha inscrição</div>
-                      <div class="mt-2">
-  <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
-</div>
-<div class="mt-2 grid grid-cols-2 gap-2">
-
-                        <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
-                          ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
-                        </select>
-                        <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
-                          ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"Coringa")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
-                        </select>
-                      </div>
-                      <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
-                        Salvar inscrição
-                      </button>
-                      <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
-                    </div>
-
-<div class="mt-3 rounded-xl border bg-white p-3">
-  <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
-  <div class="mt-1 text-xs text-gray-500">Use este código para entrar na mesma inscrição em outro celular/PC.</div>
-  <div class="mt-2 flex items-center gap-2">
-    <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
-      ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
-    </div>
-    <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
-      Copiar
-    </button>
-</div>
-</div>
-
-  ${!meObj.accessCode ? `
-    <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
-      Gerar meu código
-    </button>
-  ` : ``}
-</div>
-                    <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
-                      Sair da lista
-                    </button>
-
-                    ${myPresent ? `
-` : `
-                      <div class="mt-2 text-sm text-gray-600">
-                        Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
-                      </div>
-                    `}
-                  ` : `
-                    ${session.prevPlayerId ? `
-                      <button id="btnBackToMe" class="w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
-                        Voltar para meu jogador
-                      </button>
-                    ` : ``}
-<div class="mt-2 rounded-xl border bg-gray-50 p-3">
-
-  <div class="text-sm font-extrabold text-gray-800">Já se inscreveu?</div>
-  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar sua inscrição neste aparelho.</div>
-  <div class="mt-2 flex gap-2">
-    <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
-    <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
-  </div>
-</div>
-<div class="text-xs text-gray-500 mt-2">Dica: ao se inscrever, anote seu Código do Jogador.</div>
-`}
-                </div>
-
-                
+                ${renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg })}
 
                 ${session.admin ? `
                 <div class="border-t pt-3">
@@ -3250,6 +3450,10 @@ function openWhatsApp(text, numberDigits){
                 <div class="border-t pt-3">
                   ${session.admin ? `
                     <div class="text-sm text-green-700 font-semibold">✓ ${session.developer ? "Desenvolvedor ativo" : "Admin ativo"}</div>
+                    <div class="mt-2 flex flex-wrap items-center gap-2">
+                      <button id="btnNotifToggleRoom" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">${notificationsEnabled() ? "Desativar notificações" : "Ativar notificações"}</button>
+                      <span class="text-xs text-gray-500">${escapeHtml(notificationStatusLabel())}</span>
+                    </div>
                     <div class="mt-2 flex flex-wrap gap-1.5">
                       <button id="btnToggleOpen" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">${state.open ? "Fechar" : "Abrir"} inscrição</button>
                       <button id="btnNewRound" class="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold">Nova rodada</button>
@@ -3666,6 +3870,8 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnStartFreeTrial")) $("btnStartFreeTrial").onclick = ()=> createFreeTrialRoom();
         if($("btnAccessLogout")) $("btnAccessLogout").onclick = ()=> adminLogout();
         if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
+        if($("btnNotifToggle")) $("btnNotifToggle").onclick = ()=> notificationsEnabled() ? disableSystemNotifications() : enableSystemNotifications();
+        if($("btnNotifToggleRoom")) $("btnNotifToggleRoom").onclick = ()=> notificationsEnabled() ? disableSystemNotifications() : enableSystemNotifications();
         if($("btnCurrentExtendTrial")) $("btnCurrentExtendTrial").onclick = ()=> developerExtendTrial(code, 7);
         if($("btnCurrentConvertBasic")) $("btnCurrentConvertBasic").onclick = ()=> developerConvertTrialToPaid(code, "basico");
         if($("btnCurrentRenewMonth")) $("btnCurrentRenewMonth").onclick = ()=> developerRenewMonthly(code, 1);
@@ -3691,8 +3897,25 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
     if($("btnAccessAdmin")) $("btnAccessAdmin").onclick = ()=> adminLogin();
     if($("btnAccessDeveloper")) $("btnAccessDeveloper").onclick = ()=> developerLogin();
     if($("btnAccessLogout")) $("btnAccessLogout").onclick = ()=> adminLogout();
+    if($("btnNotifToggle")) $("btnNotifToggle").onclick = ()=> notificationsEnabled() ? disableSystemNotifications() : enableSystemNotifications();
     $("btnJoin").onclick = ()=> joinRoom();
+    if($("btnPasteJoin")) $("btnPasteJoin").onclick = ()=> pasteRoomCodeAndJoin();
     $("btnCreate").onclick = ()=> createRoom();
+    if($("roomCode")) {
+      $("roomCode").addEventListener("input", ()=>{
+        const normalized = normalizeRoomCode(($('roomCode')?.value || '').replace(/\s+/g, ''));
+        if($('roomCode').value !== normalized) $('roomCode').value = normalized;
+      });
+      $("roomCode").addEventListener("paste", ()=>{
+        setTimeout(()=>{
+          const pasted = normalizeRoomCode(($('roomCode')?.value || '').replace(/\s+/g, ''));
+          if(pasted){
+            $('roomCode').value = pasted;
+            joinRoomByCode(pasted);
+          }
+        }, 20);
+      });
+    }
 
     document.querySelectorAll("[data-open-group]").forEach(btn=>{
       btn.addEventListener("click", ()=>{
@@ -3758,6 +3981,11 @@ window.addEventListener("unhandledrejection", (ev)=>{
       const roomFromQuery = roomCodeFromUrl();
       if(roomFromQuery){
         joinRoomByCode(roomFromQuery);
+      }else{
+        const rememberedRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, ""));
+        if(rememberedRoom && ((accessMode() === "player" && !!session.playerId) || accessMode() === "developer")){
+          joinRoomByCode(rememberedRoom);
+        }
       }
 
       if ("serviceWorker" in navigator) {
