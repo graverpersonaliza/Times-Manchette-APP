@@ -2053,15 +2053,29 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       const c = String(code||"").toUpperCase();
       const rid = String(roundId||"");
       if(!rid) throw new Error("Rodada ativa não encontrada.");
-      const normalized = Object.assign({}, patch || {});
+
+      const currentAttendance = (state.attendance && state.attendance[playerId]) || {};
+      const currentMirror = attendanceMirrorFromPlayer((state.players && state.players[playerId]) || {}, rid) || {};
+      const base = Object.assign({}, currentMirror, currentAttendance);
+
+      const normalized = Object.assign({}, base, patch || {});
+
       if(typeof normalized.present === "boolean") normalized.present = !!normalized.present;
+      else normalized.present = !!base.present;
+
       if(!(normalized.team === 1 || normalized.team === 2)) normalized.team = null;
-      if(normalized.present && !normalized.checkedInAtMs) normalized.checkedInAtMs = nowMs();
+
+      if(normalized.present && !normalized.checkedInAtMs){
+        normalized.checkedInAtMs = base.checkedInAtMs || nowMs();
+      }
+
       if(!normalized.present){
         normalized.team = null;
         normalized.checkedInAtMs = null;
       }
+
       normalized.updatedAt = normalized.updatedAt || nowIso();
+
       await attendanceCol(c, rid).doc(playerId).set(normalized, { merge:true });
       await playersCol(c).doc(playerId).set({
         presenceRoundId: rid,
@@ -3235,12 +3249,28 @@ function openWhatsApp(text, numberDigits){
       }
 
       if(!meObj){
-        return `
-          ${(!session.prevPlayerId && deviceRegistered) ? `
+        if(!session.prevPlayerId && deviceRegistered){
+          return `
             <div class="rounded-xl border bg-amber-50 p-3 text-sm text-amber-800">
-              Este celular já possui uma inscrição nesta sala. Use <b>Recuperar meu acesso</b> ou peça para o Admin remover sua inscrição antes de cadastrar novamente.
+              Este celular já possui uma inscrição nesta sala. Recupere seu acesso abaixo. Para cadastrar outra pessoa neste aparelho, entre primeiro na sua inscrição e use <b>Adicionar jogador</b>.
             </div>
-          ` : ``}
+            <div class="mt-3 rounded-xl border bg-blue-50 p-3">
+              <div class="text-sm font-extrabold text-blue-800">Recuperar meu acesso</div>
+              <div class="mt-1 text-xs text-blue-700">Use seu Código do Jogador ou toque no botão para recuperar automaticamente a inscrição deste aparelho.</div>
+              <div class="mt-2 flex flex-col sm:flex-row gap-2">
+                <button id="btnReconnectMe" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
+                  Recuperar automaticamente
+                </button>
+              </div>
+              <div class="mt-2 flex gap-2">
+                <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
+                <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
+              </div>
+            </div>
+          `;
+        }
+
+        return `
           <div class="grid gap-2">
             <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
 
@@ -3261,11 +3291,11 @@ function openWhatsApp(text, numberDigits){
               </div>
             </div>
 
-            <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "disabled"}>
+            <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
               Entrar na lista
             </button>
 
-            <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !( !session.prevPlayerId && deviceRegistered )) ? "" : "disabled"}>
+            <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
               📲 Enviar Inscrição
             </button>
           </div>
