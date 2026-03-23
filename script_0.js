@@ -1037,6 +1037,61 @@ async function ensureMeLoaded(){
       return a && (a.team === 1 || a.team === 2) ? a.team : null;
     }
 
+    function attendanceMirrorFromPlayer(player, roundId = state.activeRoundId){
+      const p = player || {};
+      const rid = String(roundId || "");
+      if(!rid) return null;
+      if(String(p.presenceRoundId || "") !== rid) return null;
+      return {
+        present: !!p.present,
+        team: (p.team === 1 || p.team === 2) ? p.team : null,
+        checkedInAtMs: Number(p.checkedInAtMs || 0) || null,
+        updatedAt: p.attendanceUpdatedAt || p.updatedAt || nowIso()
+      };
+    }
+
+    function rebuildAttendanceFromPlayers(base = {}){
+      const rid = String(state.activeRoundId || "");
+      if(!rid) return base || {};
+      const merged = Object.assign({}, base || {});
+      for(const p of Object.values(state.players || {})){
+        if(!p || !p.id) continue;
+        if(merged[p.id] && typeof merged[p.id].present === "boolean") continue;
+        const mirror = attendanceMirrorFromPlayer(p, rid);
+        if(mirror) merged[p.id] = mirror;
+      }
+      return merged;
+    }
+
+    function hasSelfRatedCurrentRound(player){
+      const p = player || me();
+      if(!p) return false;
+      return String(p.selfRatedRoundId || "") === String(state.activeRoundId || "");
+    }
+
+    async function markSelfRatedNow(player, scoreOverride){
+      const p = player || me();
+      if(!p) throw new Error("Jogador não encontrado.");
+      if(!state.code || !state.activeRoundId) throw new Error("Rodada não carregou.");
+      const nextScore = clamp(Number(scoreOverride != null ? scoreOverride : p.baseNote || RATE_BASELINE), MIN_NOTA, MAX_NOTA);
+      await setPlayer(state.code, {
+        id: p.id,
+        baseNote: nextScore,
+        selfRatedRoundId: String(state.activeRoundId || ""),
+        selfRatedAtMs: nowMs(),
+        updatedAt: nowIso()
+      });
+      if(state.players && state.players[p.id]){
+        state.players[p.id] = Object.assign({}, state.players[p.id], {
+          baseNote: nextScore,
+          selfRatedRoundId: String(state.activeRoundId || ""),
+          selfRatedAtMs: nowMs(),
+          updatedAt: nowIso()
+        });
+      }
+      return nextScore;
+    }
+
     // ===============================
     // Indicadores, ranking e relatórios
     // ===============================
@@ -1310,7 +1365,7 @@ async function ensureMeLoaded(){
         const obj = {};
         qs.forEach(doc=> obj[doc.id] = doc.data());
         maybeNotifyAttendanceSnapshot(obj);
-        state.attendance = obj;
+        state.attendance = rebuildAttendanceFromPlayers(obj);
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
     }
@@ -1368,6 +1423,7 @@ async function ensureMeLoaded(){
         qs.forEach(doc=> obj[doc.id] = doc.data());
         maybeNotifyPlayersSnapshot(obj);
         state.players = obj;
+        state.attendance = rebuildAttendanceFromPlayers(state.attendance);
         render();
       }, (err)=> setSyncError(err && err.message ? err.message : err));
 
@@ -1970,7 +2026,24 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       const c = String(code||"").toUpperCase();
       const rid = String(roundId||"");
       if(!rid) throw new Error("Rodada ativa não encontrada.");
-      await attendanceCol(c, rid).doc(playerId).set(patch, { merge:true });
+      const normalized = Object.assign({}, patch || {});
+      if(typeof normalized.present === "boolean") normalized.present = !!normalized.present;
+      if(!(normalized.team === 1 || normalized.team === 2)) normalized.team = null;
+      if(normalized.present && !normalized.checkedInAtMs) normalized.checkedInAtMs = nowMs();
+      if(!normalized.present){
+        normalized.team = null;
+        normalized.checkedInAtMs = null;
+      }
+      normalized.updatedAt = normalized.updatedAt || nowIso();
+      await attendanceCol(c, rid).doc(playerId).set(normalized, { merge:true });
+      await playersCol(c).doc(playerId).set({
+        presenceRoundId: rid,
+        present: !!normalized.present,
+        team: normalized.team,
+        checkedInAtMs: normalized.checkedInAtMs || null,
+        attendanceUpdatedAt: normalized.updatedAt,
+        updatedAt: nowIso()
+      }, { merge:true });
       await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
     }
 
@@ -2594,6 +2667,20 @@ async function randomizeTeams(){
       window.__score = 8;
       renderScoreButtons();
     }
+    async function openRatingFlow(){
+      try{
+        let m = me();
+        if(!m) m = await ensureMeLoaded();
+        if(!m) return alert("Inscreva-se para avaliar.");
+        const scoreFromProfile = clamp(Number(document.getElementById("myNoteSelect")?.value || m.baseNote || RATE_BASELINE), MIN_NOTA, MAX_NOTA);
+        if(!hasSelfRatedCurrentRound(m)){
+          await markSelfRatedNow(m, scoreFromProfile);
+          setInfo("<b>Nota atualizada.</b> Você pode continuar avaliando os jogadores normalmente.");
+        }
+        openRatingModal();
+      }catch(e){ setSyncError(e && e.message ? e.message : e); }
+    }
+
     function closeRatingModal(){ $("ratingBack").classList.add("hidden"); }
 
     function renderScoreButtons(){
@@ -3069,7 +3156,7 @@ function openWhatsApp(text, numberDigits){
     }
 
 
-    function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
+    function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, mySelfRated, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
       const hasPlayerSession = accessMode() === "player" && !!session.playerId;
 
       if(hasPlayerSession && !meObj){
@@ -3187,7 +3274,7 @@ function openWhatsApp(text, numberDigits){
               <span class="font-semibold">${waiting.length}</span> em espera
             </div>
 
-            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">Avaliar jogadores</button>
+            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">Dar nota / avaliar jogadores</button>
           </div>
 
           ${bMsg.text ? `
@@ -3281,6 +3368,7 @@ function openWhatsApp(text, numberDigits){
       const myNote = meObj ? computedNote(meObj, byTarget).toFixed(1) : "";
       const myPresent = meObj ? isPresent(meObj.id) : false;
       const myTeam = meObj ? teamOf(meObj.id) : null;
+      const mySelfRated = meObj ? hasSelfRatedCurrentRound(meObj) : false;
       const hasPlayerSession = accessMode() === "player" && !!session.playerId;
 
       const presentPlayers = playersArr.filter(p=> isPresent(p.id));
@@ -3363,7 +3451,7 @@ function openWhatsApp(text, numberDigits){
                   ${openBadge}
                 </div>
 
-                ${renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg })}
+                ${renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, mySelfRated, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg })}
 
                 ${session.admin ? `
                 <div class="border-t pt-3">
@@ -3701,7 +3789,7 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
         if($("btnPresent")) $("btnPresent").onclick = ()=> markPresence(true);
         if($("btnAbsent")) $("btnAbsent").onclick = ()=> markPresence(false);
 
-        if($("btnRate")) $("btnRate").onclick = ()=> openRatingModal();
+        if($("btnRate")) $("btnRate").onclick = ()=> openRatingFlow();
         if($("btnTeam1")) $("btnTeam1").onclick = ()=> chooseTeam(1);
         if($("btnTeam2")) $("btnTeam2").onclick = ()=> chooseTeam(2);
 
