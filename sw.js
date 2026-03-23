@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-dev-fix21";
+const CACHE_NAME = "manchette-dev-fix24-session";
 const ASSETS = [
   "./",
   "./index.html",
@@ -48,4 +48,25 @@ self.addEventListener("fetch", (event) => {
         .catch(() => caches.match("./index.html"));
     })
   );
+});
+
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification && event.notification.data && event.notification.data.url) || "./";
+  event.waitUntil((async () => {
+    const allClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const client of allClients) {
+      try {
+        const url = new URL(client.url);
+        const target = new URL(targetUrl, self.location.origin);
+        if (url.origin === target.origin) {
+          await client.focus();
+          if ("navigate" in client) await client.navigate(target.href);
+          return;
+        }
+      } catch (e) {}
+    }
+    await clients.openWindow(targetUrl);
+  })());
 });
