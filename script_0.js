@@ -2826,20 +2826,68 @@ async function randomizeTeams(){
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
+    function adminSuggestedTeam(playerId){
+      const byTarget = byTargetScores(state.ratings);
+      const playersArr = Object.values(state.players || {});
+      const noteOf = (p)=> computedNote(p, byTarget);
+      const currentTeam = teamOf(playerId);
+      let team1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1 && p.id!==playerId);
+      let team2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2 && p.id!==playerId);
+      const count1 = team1.length;
+      const count2 = team2.length;
+      if(count1 >= TEAM_MAX && count2 >= TEAM_MAX) return null;
+      if(count1 >= TEAM_MAX) return 2;
+      if(count2 >= TEAM_MAX) return 1;
+      const sum1 = team1.reduce((s,p)=> s + noteOf(p), 0);
+      const sum2 = team2.reduce((s,p)=> s + noteOf(p), 0);
+      if(sum1 === sum2){
+        if(count1 === count2) return currentTeam === 1 || currentTeam === 2 ? currentTeam : 1;
+        return count1 <= count2 ? 1 : 2;
+      }
+      return sum1 <= sum2 ? 1 : 2;
+    }
+
+    async function adminChoosePlayerTeam(playerId, playerName, team){
+      if(!session.admin) return alert("Somente admin.");
+      const rid = state.activeRoundId;
+      if(!rid) return alert("Rodada ativa não encontrada.");
+      const current = (state.attendance && state.attendance[playerId]) || attendanceMirrorFromPlayer((state.players && state.players[playerId]) || {}, rid) || {};
+      if(team !== 1 && team !== 2 && team !== null) return;
+      const patch = {
+        present: true,
+        team: team === 1 || team === 2 ? team : null,
+        checkedInAtMs: current.checkedInAtMs || nowMs(),
+        updatedAt: nowIso()
+      };
+      try{
+        await setAttendance(state.code, rid, playerId, patch);
+        if(team === 1 || team === 2) setInfo(`${playerName} movido para ${team===1 ? state.team1Name : state.team2Name}.`);
+        else setInfo(`${playerName} ficou sem time.`);
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
     async function adminSetPlayerPresence(playerId, playerName, present){
       if(!session.admin) return alert("Somente admin.");
       const rid = state.activeRoundId;
       if(!rid) return alert("Rodada ativa não encontrada.");
       const current = (state.attendance && state.attendance[playerId]) || attendanceMirrorFromPlayer((state.players && state.players[playerId]) || {}, rid) || {};
+      const autoTeam = present ? (current.team === 1 || current.team === 2 ? current.team : adminSuggestedTeam(playerId)) : null;
       const patch = {
         present: !!present,
-        team: present ? (current.team === 1 || current.team === 2 ? current.team : null) : null,
+        team: present ? (autoTeam === 1 || autoTeam === 2 ? autoTeam : null) : null,
         checkedInAtMs: present ? (current.checkedInAtMs || nowMs()) : null,
         updatedAt: nowIso()
       };
       try{
         await setAttendance(state.code, rid, playerId, patch);
-        setInfo(present ? `${playerName} marcado como presente.` : `${playerName} marcado como ausente.`);
+        if(present){
+          const assigned = patch.team === 1 ? state.team1Name : patch.team === 2 ? state.team2Name : 'sem time';
+          setInfo(`${playerName} marcado como presente${patch.team ? ` e enviado para ${assigned}.` : ", mas ficou sem time."}`);
+        }else{
+          setInfo(`${playerName} marcado como ausente.`);
+        }
       }catch(e){
         setSyncError(e && e.message ? e.message : e);
       }
@@ -3224,6 +3272,9 @@ function openWhatsApp(text, numberDigits){
       const you = isMe ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
       const actions = [];
       if(isAdmin && !isMe){
+        actions.push(`<button data-admin-team="${p.id}" data-team="1" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 text-[11px] font-semibold">${escapeHtml(state.team1Name || "Time 1")}</button>`);
+        actions.push(`<button data-admin-team="${p.id}" data-team="2" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-rose-100 text-rose-800 hover:bg-rose-200 text-[11px] font-semibold">${escapeHtml(state.team2Name || "Time 2")}</button>`);
+        actions.push(`<button data-admin-team-clear="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 text-[11px] font-semibold">Tirar do time</button>`);
         actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
@@ -3246,6 +3297,8 @@ function openWhatsApp(text, numberDigits){
       const isMe = (meId && p.id===meId);
       const actions = [];
       if(isAdmin && !isMe){
+        actions.push(`<button data-admin-team="${p.id}" data-team="1" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 text-[11px] font-semibold">${escapeHtml(state.team1Name || "Time 1")}</button>`);
+        actions.push(`<button data-admin-team="${p.id}" data-team="2" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-rose-100 text-rose-800 hover:bg-rose-200 text-[11px] font-semibold">${escapeHtml(state.team2Name || "Time 2")}</button>`);
         actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
@@ -3256,7 +3309,7 @@ function openWhatsApp(text, numberDigits){
             <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : "Apenas o próprio jogador escolhe."}</div>
+            <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : (isAdmin ? "Admin pode definir o time." : "Apenas o próprio jogador escolhe.")}</div>
             ${actions.join('')}
           </div>
         </div>
@@ -4226,6 +4279,21 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
               const pid = btn.getAttribute("data-admin-present");
               const nm = btn.getAttribute("data-name") || "Jogador";
               adminSetPlayerPresence(pid, nm, true);
+            });
+          });
+          document.querySelectorAll("[data-admin-team]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-team");
+              const nm = btn.getAttribute("data-name") || "Jogador";
+              const team = Number(btn.getAttribute("data-team") || 0);
+              adminChoosePlayerTeam(pid, nm, team === 1 || team === 2 ? team : null);
+            });
+          });
+          document.querySelectorAll("[data-admin-team-clear]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-team-clear");
+              const nm = btn.getAttribute("data-name") || "Jogador";
+              adminChoosePlayerTeam(pid, nm, null);
             });
           });
         }
