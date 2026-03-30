@@ -2826,6 +2826,25 @@ async function randomizeTeams(){
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
+    async function adminSetPlayerPresence(playerId, playerName, present){
+      if(!session.admin) return alert("Somente admin.");
+      const rid = state.activeRoundId;
+      if(!rid) return alert("Rodada ativa não encontrada.");
+      const current = (state.attendance && state.attendance[playerId]) || attendanceMirrorFromPlayer((state.players && state.players[playerId]) || {}, rid) || {};
+      const patch = {
+        present: !!present,
+        team: present ? (current.team === 1 || current.team === 2 ? current.team : null) : null,
+        checkedInAtMs: present ? (current.checkedInAtMs || nowMs()) : null,
+        updatedAt: nowIso()
+      };
+      try{
+        await setAttendance(state.code, rid, playerId, patch);
+        setInfo(present ? `${playerName} marcado como presente.` : `${playerName} marcado como ausente.`);
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
     async function resetCurrentRoom(){
       if(!session.admin) return alert("Somente admin.");
       if(!confirm("Resetar jogadores, avaliações, rodadas e histórico desta sala? (zera tudo)")) return;
@@ -3201,20 +3220,22 @@ function openWhatsApp(text, numberDigits){
     // ===============================
     function playerCard(p, byTarget, meId, isAdmin){
       const note = computedNote(p, byTarget).toFixed(1);
-      const you = (meId && p.id===meId) ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
-      const del = (isAdmin && (!meId || p.id!==meId)) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
-          Remover
-        </button>` : "";
+      const isMe = (meId && p.id===meId);
+      const you = isMe ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const actions = [];
+      if(isAdmin && !isMe){
+        actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
+        actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
+      }
       return `
-        <div class="rounded-lg border p-2 flex items-center justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
             <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
             <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             ${you}
-            ${del}
+            ${actions.join('')}
           </div>
         </div>
       `;
@@ -3223,19 +3244,20 @@ function openWhatsApp(text, numberDigits){
     function waitingCard(p, byTarget, meId, isAdmin){
       const note = computedNote(p, byTarget).toFixed(1);
       const isMe = (meId && p.id===meId);
-      const del = (isAdmin && !isMe) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
-          Remover
-        </button>` : "";
+      const actions = [];
+      if(isAdmin && !isMe){
+        actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
+        actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
+      }
       return `
         <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
             <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
             <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : "Apenas o próprio jogador escolhe."}</div>
-            ${del}
+            ${actions.join('')}
           </div>
         </div>
       `;
@@ -3245,19 +3267,20 @@ function openWhatsApp(text, numberDigits){
       const note = computedNote(p, byTarget).toFixed(1);
       const isMe = (meId && p.id===meId);
       const you = isMe ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
-      const del = (isAdmin && !isMe) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
-          Remover
-        </button>` : "";
+      const actions = [];
+      if(isAdmin && !isMe){
+        actions.push(`<button data-admin-present="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-green-100 text-green-800 hover:bg-green-200 text-[11px] font-semibold">Marcar presença</button>`);
+        actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
+      }
       return `
-        <div class="rounded-lg border p-2 flex items-center justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
             <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
             <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             ${you}
-            ${del}
+            ${actions.join('')}
           </div>
         </div>
       `;
@@ -4189,6 +4212,20 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
               const pid = btn.getAttribute("data-del");
               const nm = btn.getAttribute("data-name") || "Jogador";
               adminRemovePlayer(pid, nm);
+            });
+          });
+          document.querySelectorAll("[data-admin-absent]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-absent");
+              const nm = btn.getAttribute("data-name") || "Jogador";
+              adminSetPlayerPresence(pid, nm, false);
+            });
+          });
+          document.querySelectorAll("[data-admin-present]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-present");
+              const nm = btn.getAttribute("data-name") || "Jogador";
+              adminSetPlayerPresence(pid, nm, true);
             });
           });
         }
