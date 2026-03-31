@@ -2434,9 +2434,16 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
 
         const id = safeId();
         const accessCode = genPlayerCode(10);
-
-        const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
-        if(!addingAnother) player.deviceId = getDeviceId();
+          
+        const player = {
+  id,
+  name,
+  baseNote,
+  position,
+  accessCode,
+  deviceId: getDeviceId(), // ← SEMPRE grava o aparelho
+  createdAt: nowIso()
+};
 
         session.playerId = id;
         rememberPlayerForRoom(code, id);
