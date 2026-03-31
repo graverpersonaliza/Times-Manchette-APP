@@ -1089,6 +1089,20 @@ async function resolveExistingRegistrationForThisDevice(code){
     if(state.players && state.players[rememberedId]){
       return state.players[rememberedId];
     }
+  }
+
+  // 🔒 BLOQUEIO REAL POR APARELHO
+  const deviceId = getDeviceId();
+
+  const sameDevicePlayer = Object.values(state.players || {})
+    .find(p => p.deviceId && p.deviceId === deviceId);
+
+  if(sameDevicePlayer){
+    return sameDevicePlayer;
+  }
+
+  return null;
+}
     if(db){
       try{
         const snap = await playersCol(roomCode).doc(rememberedId).get();
