@@ -2562,6 +2562,73 @@ async function registerMeSendWhatsApp(){
 }
 
 
+    async function saveMySettings(){
+      const code = state.code;
+      let m = me();
+      if(!code) return;
+      if(!m) m = await ensureMeLoaded();
+      if(!m) return alert("Faça login para continuar.");
+
+      const name = normalizePlayerName($("myNameInput")?.value || m.name || "");
+      if(!name || name.length < 2) return alert("Informe um nome válido (mín. 2 letras).");
+      const baseNoteRaw = $("myNoteSelect")?.value || "";
+      const position = String($("myPosSelect")?.value || "").trim();
+      if(!baseNoteRaw) return alert("Escolha sua nota pessoal.");
+      if(!position) return alert("Escolha sua posição.");
+      const baseNote = clamp(Number(baseNoteRaw), MIN_NOTA, MAX_NOTA);
+
+      const needsSetup = playerNeedsPasswordSetup(m);
+      const currentPassword = String($("myCurrentPassword")?.value || "").trim();
+      const nextPassword = String($("myNewPassword")?.value || "").trim();
+      const confirmPassword = String($("myConfirmPassword")?.value || "").trim();
+      const expectedCurrent = playerPasswordOf(m);
+
+      const updates = { id: m.id, name, baseNote, position, updatedAt: nowIso() };
+      let passwordChanged = false;
+
+      if(needsSetup){
+        if(!nextPassword) return alert("Crie sua nova senha.");
+        const validation = validatePlayerPassword(nextPassword);
+        if(validation) return alert(validation);
+        if(nextPassword !== confirmPassword) return alert("A confirmação da nova senha não confere.");
+        updates.password = nextPassword;
+        updates.passwordUpdatedAt = nowIso();
+        passwordChanged = true;
+      }else{
+        const wantsPasswordChange = !!(currentPassword || nextPassword || confirmPassword);
+        if(wantsPasswordChange){
+          if(currentPassword !== expectedCurrent) return alert("Senha atual inválida.");
+          const validation = validatePlayerPassword(nextPassword);
+          if(validation) return alert(validation);
+          if(nextPassword !== confirmPassword) return alert("A confirmação da nova senha não confere.");
+          if(nextPassword === expectedCurrent) return alert("Digite uma senha diferente da atual.");
+          updates.password = nextPassword;
+          updates.passwordUpdatedAt = nowIso();
+          passwordChanged = true;
+        }
+      }
+
+      try{
+        await setPlayer(code, updates);
+        if(state.players && state.players[m.id]){
+          state.players[m.id] = Object.assign({}, state.players[m.id], updates);
+        }
+        if($("myCurrentPassword")) $("myCurrentPassword").value = "";
+        if($("myNewPassword")) $("myNewPassword").value = "";
+        if($("myConfirmPassword")) $("myConfirmPassword").value = "";
+        if(passwordChanged && needsSetup){
+          setInfo("<b>Alterações salvas.</b> Sua senha foi criada com sucesso.");
+        }else if(passwordChanged){
+          setInfo("Alterações salvas. Senha atualizada com sucesso.");
+        }else{
+          setInfo("Alterações salvas.");
+        }
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+}
+
     async function updateMyProfile(){
       const code = state.code;
       const m = me();
@@ -3495,12 +3562,12 @@ async function randomizeTeams(){
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <select id="playerNote" class="px-3 py-2 rounded-lg border">
                     <option value="" selected>Selecione a nota pessoal</option>
-                    <option value="5">Minha nota 5</option>
-                    <option value="6">Minha nota 6</option>
-                    <option value="7">Minha nota 7</option>
-                    <option value="8">Minha nota 8</option>
-                    <option value="9">Minha nota 9</option>
-                    <option value="10">Minha nota 10</option>
+                    <option value="5">Nota 5</option>
+                    <option value="6">Nota 6</option>
+                    <option value="7">Nota 7</option>
+                    <option value="8">Nota 8</option>
+                    <option value="9">Nota 9</option>
+                    <option value="10">Nota 10</option>
                   </select>
                   <select id="playerPos" class="px-3 py-2 rounded-lg border">
                     <option value="" selected>Selecione a posição</option>
@@ -3516,7 +3583,6 @@ async function randomizeTeams(){
               </div>
             </div>
           ` : `
-            <div class="mt-3 text-xs text-gray-500">Seu cadastro deve ser criado pelo Admin da sala.</div>
           `}
 
           ${session.prevPlayerId ? `
@@ -3557,25 +3623,6 @@ async function randomizeTeams(){
           </button>
         </div>
 
-        <div class="mt-2 grid ${canAddPlayer ? "grid-cols-2" : "grid-cols-1"} gap-2">
-          ${canAddPlayer ? `
-            <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
-              Adicionar jogador
-            </button>
-          ` : ``}
-          ${session.prevPlayerId ? `
-            <button id="btnBackToMe2" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
-              Voltar para meu jogador
-            </button>
-          ` : `${canAddPlayer ? `<button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>Voltar para meu jogador</button>` : ``}`}
-        </div>
-
-        ${canAddPlayer ? `
-          <div class="mt-1 text-xs text-gray-600">
-            Somente Admin pode adicionar jogador. Novos acessos começam com a senha <b>${DEFAULT_PLAYER_PASSWORD}</b>.
-          </div>
-        ` : ``}
-
         <div class="border-t pt-3">
           <div class="grid gap-2">
             <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
@@ -3604,32 +3651,26 @@ async function randomizeTeams(){
         </div>
 
         <div class="mt-3 rounded-xl border bg-white p-3">
-          <div class="text-sm font-extrabold text-gray-800">Atualizar minha inscrição</div>
+          <div class="text-sm font-extrabold text-gray-800">Atualizar inscrição</div>
           <div class="mt-2">
-            <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
+            <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Nome" value="${escapeHtml(meObj.name||"")}" />
           </div>
           <div class="mt-2 grid grid-cols-2 gap-2">
             <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
               <option value="">Selecione a nota pessoal</option>
-              ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${Number(meObj.baseNote)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
+              ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${Number(meObj.baseNote)===n?'selected':''}>Nota ${n}</option>`).join("")}
             </select>
             <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
               <option value="">Selecione a posição</option>
               ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
             </select>
           </div>
-          <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
-            Salvar inscrição
-          </button>
-          <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
-        </div>
 
-        <div class="mt-3 rounded-xl border bg-white p-3">
-          <div class="text-sm font-extrabold text-gray-800">${passwordPending ? "Criar minha senha" : "Alterar minha senha"}</div>
+          <div class="mt-4 text-sm font-extrabold text-gray-800">${passwordPending ? "Criar senha" : "Alterar senha"}</div>
           ${passwordPending ? `
             <div class="mt-1 text-xs text-amber-700">Seu acesso ainda está com a senha padrão <b>${DEFAULT_PLAYER_PASSWORD}</b>. Crie sua própria senha para liberar presença, time e avaliação.</div>
           ` : `
-            <div class="mt-1 text-xs text-gray-500">Digite sua senha atual e depois a nova senha.</div>
+            <div class="mt-1 text-xs text-gray-500">Preencha a parte da senha somente quando quiser trocar.</div>
           `}
           ${passwordPending ? `` : `
             <div class="mt-2">
@@ -3640,20 +3681,21 @@ async function randomizeTeams(){
             <input id="myNewPassword" type="password" class="px-3 py-2 rounded-lg border" placeholder="Nova senha" />
             <input id="myConfirmPassword" type="password" class="px-3 py-2 rounded-lg border" placeholder="Confirmar nova senha" />
           </div>
-          <button id="btnSaveMyPassword" class="mt-2 w-full px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
-            ${passwordPending ? "Criar minha senha" : "Salvar nova senha"}
+
+          <button id="btnSaveMySettings" class="mt-3 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
+            Salvar alterações
           </button>
+
           ${session.admin ? `
             <button id="btnResetMyPlayerPassword" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
-              Resetar minha senha para ${DEFAULT_PLAYER_PASSWORD}
+              Resetar senha para ${DEFAULT_PLAYER_PASSWORD}
             </button>
           ` : ``}
+
+          <div class="mt-2 text-xs text-gray-500">Você pode ajustar nota, posição e senha no mesmo salvamento.</div>
         </div>
 
-        <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button id="btnLogoutPlayerSession" class="w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
-            Trocar jogador / sair desta conta
-          </button>
+        <div class="mt-3">
           <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
             Sair da lista
           </button>
@@ -3756,7 +3798,8 @@ async function randomizeTeams(){
                   <span class="font-semibold tracking-widest">${escapeHtml(code)}</span>
                 </span>
                 <button id="btnCopy" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Copiar</button>
-                <button id="btnLeave" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sair</button>
+                ${session.playerId || session.prevPlayerId ? `<button id="btnLeave" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Sair</button>` : ``}
+                <button id="btnGoHome" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Tela inicial</button>
               ` : ``}
             </div>
           </div>
@@ -4091,14 +4134,13 @@ async function randomizeTeams(){
           try{ await navigator.clipboard.writeText(code); setInfo("Código copiado."); }
           catch{ setInfo("Não foi possível copiar automaticamente."); }
         };
-        $("btnLeave").onclick = ()=> leaveRoom();
+        if($("btnLeave")) $("btnLeave").onclick = ()=> logoutPlayerSession();
+        if($("btnGoHome")) $("btnGoHome").onclick = ()=> leaveRoom();
 
         if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
         if($("btnRegisterSendWA")) $("btnRegisterSendWA").onclick = ()=> registerMeSendWhatsApp();
-        if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
-        if($("btnSaveMyPassword")) $("btnSaveMyPassword").onclick = ()=> saveMyPassword();
+        if($("btnSaveMySettings")) $("btnSaveMySettings").onclick = ()=> saveMySettings();
         if($("btnPlayerPasswordLogin")) $("btnPlayerPasswordLogin").onclick = ()=> loginPlayerByNamePassword();
-        if($("btnLogoutPlayerSession")) $("btnLogoutPlayerSession").onclick = ()=> logoutPlayerSession();
         if($("btnResetMyPlayerPassword")) $("btnResetMyPlayerPassword").onclick = ()=> { const m = me(); if(m) resetPlayerPasswordByAdmin(m.id, m.name); };
 
         if($("btnAddPlayer")) $("btnAddPlayer").onclick = ()=> startAddPlayer();
