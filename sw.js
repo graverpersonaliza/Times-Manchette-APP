@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-dev-fix32-admin-time-auto";
+const CACHE_NAME = "manchette-player-password-v20260404";
 const ASSETS = [
   "./",
   "./index.html",
