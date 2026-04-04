@@ -144,6 +144,25 @@ function playerPasswordOf(player){
   return raw || DEFAULT_PLAYER_PASSWORD;
 }
 
+function playerNeedsPasswordSetup(player){
+  const raw = String((player && player.password) || "").trim();
+  return !raw || raw === DEFAULT_PLAYER_PASSWORD;
+}
+
+function validatePlayerPassword(value){
+  const pass = String(value || "").trim();
+  if(pass.length < 4) return "A nova senha precisa ter pelo menos 4 caracteres.";
+  if(pass.length > 30) return "A nova senha pode ter no máximo 30 caracteres.";
+  if(/\s/.test(pass)) return "A senha não pode conter espaços.";
+  return "";
+}
+
+function ensurePlayerPasswordReady(player){
+  if(!playerNeedsPasswordSetup(player)) return true;
+  setInfo("<b>Crie sua própria senha para continuar.</b>");
+  return false;
+}
+
 function playerMissingProfileFields(player){
   const missing = [];
   const baseNote = Number(player && player.baseNote);
@@ -190,8 +209,9 @@ function buildInviteMessage(nome, sala){
     `1) Abra o site`,
     `2) Entre na sala ${sala}`,
     `3) Faça login com seu nome e a senha ${DEFAULT_PLAYER_PASSWORD}`,
-    `4) Complete sua nota pessoal e posição se estiver faltando`,
-    `5) Confirme presença e escolha o time`
+    `4) No primeiro acesso, crie sua própria senha`,
+    `5) Complete sua nota pessoal e posição se estiver faltando`,
+    `6) Confirme presença e escolha o time`
   );
 
   return lines.join("\n");
@@ -217,6 +237,7 @@ async function loginPlayerByNamePassword(){
     if(rawPassword !== expectedPassword) return alert("Senha do jogador inválida.");
 
     session.playerId = found.id;
+    session.prevPlayerId = "";
     rememberPlayerForRoom(code, found.id);
     persistSession();
 
@@ -228,7 +249,9 @@ async function loginPlayerByNamePassword(){
       }catch(e){}
     }
 
-    if(playerHasRequiredProfile(found)){
+    if(playerNeedsPasswordSetup(found)){
+      setInfo(`<b>${escapeHtml(found.name || "Jogador")}</b>, este é seu primeiro acesso. Crie sua própria senha para continuar.`);
+    }else if(playerHasRequiredProfile(found)){
       setInfo(`Acesso liberado para <b>${escapeHtml(found.name || "Jogador")}</b>.`);
     }else{
       setInfo(`<b>${escapeHtml(found.name || "Jogador")}</b>, complete sua nota pessoal e posição para continuar.`);
@@ -314,21 +337,13 @@ function safeBoldInfo(s){
       return raw && typeof raw === "object" ? raw : {};
     }
     function getRememberedPlayerIdForRoom(code){
-      const c = normalizeRoomCode(code);
-      if(!c) return "";
-      const map = loadRoomPlayerMap();
-      return String(map[c] || "");
+      return "";
     }
     function rememberPlayerForRoom(code, playerId){
-      const c = normalizeRoomCode(code);
-      if(!c) return;
-      const map = loadRoomPlayerMap();
-      if(playerId) map[c] = String(playerId);
-      else delete map[c];
-      save(LS_ROOM_PLAYER_MAP, map);
+      return;
     }
     function forgetPlayerForRoom(code){
-      rememberPlayerForRoom(code, "");
+      return;
     }
     function persistSession(){
       save(LS_SESSION, session);
@@ -349,6 +364,8 @@ function safeBoldInfo(s){
         base.role = "player";
         base.developer = false;
         base.admin = false;
+        base.playerId = "";
+        base.prevPlayerId = "";
       }
       base.adminPassDraft = String(base.adminPassDraft || "");
       return base;
@@ -2401,9 +2418,8 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
           session.playerId = "";
           session.prevPlayerId = "";
         }
-        if(mode === "player" && !session.prevPlayerId && !session.playerId){
-          const rememberedId = getRememberedPlayerIdForRoom(code);
-          if(rememberedId) session.playerId = rememberedId;
+        if(mode === "player"){
+          session.playerId = "";
         }
         persistSession();
         syncRoomUrl(code);
@@ -2413,7 +2429,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
           ? "<b>Entrou na sala como Desenvolvedor.</b> Você tem visão e controle avançado desta sala."
           : mode === "admin"
             ? "<b>Entrou na sala como Admin.</b> Os controles administrativos já estão liberados."
-            : "<b>Entrou na sala.</b> Faça login com seu nome e senha. Jogadores antigos usam 123456.";
+            : "<b>Entrou na sala.</b> Faça login com seu nome e senha. Senha padrão 123456.";
         setInfo(entryMsg);
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -2530,7 +2546,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
     async function registerMe(){
       try{
         const player = await createPlayerByAdmin({ openWhatsApp:false });
-        setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado com senha padrão ${DEFAULT_PLAYER_PASSWORD}.`);
+        setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado com senha padrão ${DEFAULT_PLAYER_PASSWORD}. No primeiro acesso ele cria a própria senha.`);
         render();
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -2538,7 +2554,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
 async function registerMeSendWhatsApp(){
   try{
     const player = await createPlayerByAdmin({ openWhatsApp:true });
-    setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado. O WhatsApp foi aberto com a senha padrão ${DEFAULT_PLAYER_PASSWORD}.`);
+    setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado. O WhatsApp foi aberto com a senha padrão ${DEFAULT_PLAYER_PASSWORD}. No primeiro acesso ele cria a própria senha.`);
     render();
   }catch(e){
     setSyncError(e && e.message ? e.message : e);
@@ -2567,6 +2583,49 @@ async function registerMeSendWhatsApp(){
       }
 }
 
+async function saveMyPassword(){
+      const code = state.code;
+      let m = me();
+      if(!code) return;
+      if(!m) m = await ensureMeLoaded();
+      if(!m) return alert("Faça login para alterar sua senha.");
+
+      const needsSetup = playerNeedsPasswordSetup(m);
+      const currentPassword = String($("myCurrentPassword")?.value || "").trim();
+      const nextPassword = String($("myNewPassword")?.value || "").trim();
+      const confirmPassword = String($("myConfirmPassword")?.value || "").trim();
+      const expectedCurrent = playerPasswordOf(m);
+
+      if(!needsSetup && currentPassword !== expectedCurrent) return alert("Senha atual inválida.");
+      const validation = validatePlayerPassword(nextPassword);
+      if(validation) return alert(validation);
+      if(nextPassword !== confirmPassword) return alert("A confirmação da nova senha não confere.");
+      if(!needsSetup && nextPassword === expectedCurrent) return alert("Digite uma senha diferente da atual.");
+
+      try{
+        await setPlayer(code, { id: m.id, password: nextPassword, passwordUpdatedAt: nowIso(), updatedAt: nowIso() });
+        if(state.players && state.players[m.id]){
+          state.players[m.id] = Object.assign({}, state.players[m.id], { password: nextPassword, passwordUpdatedAt: nowIso() });
+        }
+        if($("myCurrentPassword")) $("myCurrentPassword").value = "";
+        if($("myNewPassword")) $("myNewPassword").value = "";
+        if($("myConfirmPassword")) $("myConfirmPassword").value = "";
+        setInfo(needsSetup ? "<b>Senha criada com sucesso.</b> Agora você já pode continuar." : "Senha alterada com sucesso.");
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+}
+
+function logoutPlayerSession(){
+  forgetPlayerForRoom(state.code);
+  session.playerId = "";
+  session.prevPlayerId = "";
+  persistSession();
+  setInfo("Sessão do jogador encerrada. Faça novo login por nome + senha.");
+  render();
+}
+
 
     
 function startAddPlayer(){
@@ -2580,7 +2639,7 @@ function startAddPlayer(){
   if($("playerName")) $("playerName").value = "";
   if($("playerNote")) $("playerNote").value = "";
   if($("playerPos")) $("playerPos").value = "";
-  setInfo(`Modo adicionar jogador: cadastre a pessoa e informe a senha padrão ${DEFAULT_PLAYER_PASSWORD}.`);
+  setInfo(`Modo adicionar jogador: cadastre a pessoa e informe a senha padrão ${DEFAULT_PLAYER_PASSWORD}. No primeiro acesso ela cria a própria senha.`);
   render();
   try{ window.scrollTo({top: 0, behavior: "smooth"}); }catch{ window.scrollTo(0,0); }
 }
@@ -2598,15 +2657,7 @@ function backToPrevPlayer(){
 }
 
 function recoverMyAccessFromDevice(){
-  let found = null;
-  const rememberedId = getRememberedPlayerIdForRoom(state.code);
-  if(rememberedId && state.players && state.players[rememberedId]) found = state.players[rememberedId];
-  if(!found || !found.id) return alert("Não encontrei um acesso salvo neste aparelho para esta sala.");
-  session.playerId = found.id;
-  rememberPlayerForRoom(state.code, found.id);
-  persistSession();
-  setInfo(`Acesso recuperado para <b>${escapeHtml(found.name || "Jogador")}</b>.`);
-  render();
+  alert("O acesso salvo por aparelho foi removido. Entre com nome + senha.");
 }
 
 async function markPresence(present){
@@ -2629,6 +2680,7 @@ async function markPresence(present){
       }
       if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
       if(!state.open) return alert("Inscrição fechada.");
+      if(!ensurePlayerPasswordReady(m)) return alert("Crie sua própria senha antes de confirmar presença.");
       if(!ensurePlayerProfileComplete(m)) return alert("Complete sua nota pessoal e posição antes de confirmar presença.");
 
       try{
@@ -2676,6 +2728,7 @@ async function markPresence(present){
         }
         if(!state.open) return alert("Inscrição fechada.");
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+        if(!ensurePlayerPasswordReady(m)) return alert("Crie sua própria senha antes de escolher time.");
         if(!ensurePlayerProfileComplete(m)) return alert("Complete sua nota pessoal e posição antes de escolher time.");
         if(!isPresent(m.id)) return alert("Confirme presença antes de escolher time.");
 
@@ -2944,6 +2997,7 @@ async function randomizeTeams(){
         let m = me();
         if(!m) m = await ensureMeLoaded();
         if(!m) return alert("Faça login para avaliar.");
+        if(!ensurePlayerPasswordReady(m)) return alert("Crie sua própria senha antes de avaliar.");
         if(!ensurePlayerProfileComplete(m)) return alert("Complete sua nota pessoal e posição antes de avaliar.");
         const scoreFromProfile = clamp(Number(document.getElementById("myNoteSelect")?.value || m.baseNote || RATE_BASELINE), MIN_NOTA, MAX_NOTA);
         if(!hasSelfRatedCurrentRound(m)){
@@ -3414,25 +3468,15 @@ async function randomizeTeams(){
 
 
     function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, mySelfRated, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
-      const rememberedPlayerId = getRememberedPlayerIdForRoom(state.code);
       const canAddPlayer = !!session.admin;
       const profileIncomplete = meObj ? !playerHasRequiredProfile(meObj) : false;
+      const passwordPending = meObj ? playerNeedsPasswordSetup(meObj) : false;
 
       if(!meObj){
         return `
-          ${rememberedPlayerId ? `
-            <div class="rounded-xl border bg-blue-50 p-3">
-              <div class="text-sm font-extrabold text-blue-800">Recuperar meu acesso</div>
-              <div class="mt-1 text-xs text-blue-700">Este aparelho já possui um jogador salvo nesta sala.</div>
-              <button id="btnReconnectMe" class="mt-3 w-full px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
-                Entrar com acesso salvo
-              </button>
-            </div>
-          ` : ``}
-
           <div class="rounded-xl border bg-blue-50 p-3">
             <div class="text-sm font-extrabold text-blue-800">Entrar como jogador</div>
-            <div class="mt-1 text-xs text-blue-700">Use seu nome exatamente como foi cadastrado pelo Admin e sua senha. Jogadores antigos entram com <b>${DEFAULT_PLAYER_PASSWORD}</b>.</div>
+            <div class="mt-1 text-xs text-blue-700">Use seu nome exatamente como foi cadastrado pelo Admin e sua senha. A senha padrão é <b>${DEFAULT_PLAYER_PASSWORD}</b>. No primeiro acesso, crie sua própria senha.</div>
             <div class="mt-3 grid gap-2">
               <input id="playerLoginName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
               <input id="playerLoginPass" type="password" placeholder="Sua senha" class="px-3 py-2 rounded-lg border" />
@@ -3492,6 +3536,12 @@ async function randomizeTeams(){
           ${myTeam ? ` · Time ${myTeam}` : ``}
         </div>
 
+        ${passwordPending ? `
+          <div class="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <b>Primeiro acesso:</b> crie sua própria senha. Enquanto isso, presença, time e avaliação ficam bloqueados.
+          </div>
+        ` : ``}
+
         ${profileIncomplete ? `
           <div class="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             <b>Complete sua nota pessoal e posição.</b> Sem isso, presença, time e avaliação ficam bloqueados.
@@ -3499,7 +3549,7 @@ async function randomizeTeams(){
         ` : ``}
 
         <div class="mt-2 flex gap-2">
-          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent && !profileIncomplete) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent && !profileIncomplete) ? "" : "disabled"}>
+          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent && !profileIncomplete && !passwordPending) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent && !profileIncomplete && !passwordPending) ? "" : "disabled"}>
             Confirmar presença
           </button>
           <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
@@ -3533,8 +3583,8 @@ async function randomizeTeams(){
             </div>
 
             <div class="flex flex-wrap gap-2">
-              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
-              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
+              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
+              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
             </div>
 
             <div class="text-xs text-gray-600">
@@ -3543,7 +3593,7 @@ async function randomizeTeams(){
               <span class="font-semibold">${waiting.length}</span> em espera
             </div>
 
-            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${profileIncomplete ? "opacity-50 cursor-not-allowed" : ""}" ${profileIncomplete ? "disabled" : ""}>Dar nota / avaliar jogadores</button>
+            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${(profileIncomplete || passwordPending) ? "opacity-50 cursor-not-allowed" : ""}" ${(profileIncomplete || passwordPending) ? "disabled" : ""}>Dar nota / avaliar jogadores</button>
           </div>
 
           ${bMsg.text ? `
@@ -3571,17 +3621,43 @@ async function randomizeTeams(){
           <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
             Salvar inscrição
           </button>
+          <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
+        </div>
+
+        <div class="mt-3 rounded-xl border bg-white p-3">
+          <div class="text-sm font-extrabold text-gray-800">${passwordPending ? "Criar minha senha" : "Alterar minha senha"}</div>
+          ${passwordPending ? `
+            <div class="mt-1 text-xs text-amber-700">Seu acesso ainda está com a senha padrão <b>${DEFAULT_PLAYER_PASSWORD}</b>. Crie sua própria senha para liberar presença, time e avaliação.</div>
+          ` : `
+            <div class="mt-1 text-xs text-gray-500">Digite sua senha atual e depois a nova senha.</div>
+          `}
+          ${passwordPending ? `` : `
+            <div class="mt-2">
+              <input id="myCurrentPassword" type="password" class="w-full px-3 py-2 rounded-lg border" placeholder="Senha atual" />
+            </div>
+          `}
+          <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <input id="myNewPassword" type="password" class="px-3 py-2 rounded-lg border" placeholder="Nova senha" />
+            <input id="myConfirmPassword" type="password" class="px-3 py-2 rounded-lg border" placeholder="Confirmar nova senha" />
+          </div>
+          <button id="btnSaveMyPassword" class="mt-2 w-full px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
+            ${passwordPending ? "Criar minha senha" : "Salvar nova senha"}
+          </button>
           ${session.admin ? `
             <button id="btnResetMyPlayerPassword" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
               Resetar minha senha para ${DEFAULT_PLAYER_PASSWORD}
             </button>
           ` : ``}
-          <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
         </div>
 
-        <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
-          Sair da lista
-        </button>
+        <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button id="btnLogoutPlayerSession" class="w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+            Trocar jogador / sair desta conta
+          </button>
+          <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
+            Sair da lista
+          </button>
+        </div>
 
         ${myPresent ? `` : `
           <div class="mt-2 text-sm text-gray-600">
@@ -4020,8 +4096,9 @@ async function randomizeTeams(){
         if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
         if($("btnRegisterSendWA")) $("btnRegisterSendWA").onclick = ()=> registerMeSendWhatsApp();
         if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
+        if($("btnSaveMyPassword")) $("btnSaveMyPassword").onclick = ()=> saveMyPassword();
         if($("btnPlayerPasswordLogin")) $("btnPlayerPasswordLogin").onclick = ()=> loginPlayerByNamePassword();
-        if($("btnReconnectMe")) $("btnReconnectMe").onclick = ()=> recoverMyAccessFromDevice();
+        if($("btnLogoutPlayerSession")) $("btnLogoutPlayerSession").onclick = ()=> logoutPlayerSession();
         if($("btnResetMyPlayerPassword")) $("btnResetMyPlayerPassword").onclick = ()=> { const m = me(); if(m) resetPlayerPasswordByAdmin(m.id, m.name); };
 
         if($("btnAddPlayer")) $("btnAddPlayer").onclick = ()=> startAddPlayer();
