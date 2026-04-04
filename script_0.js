@@ -121,7 +121,9 @@
       return out;
     }
 
-// Código do Jogador (para entrar em outro celular/PC)
+const DEFAULT_PLAYER_PASSWORD = "123456";
+
+// Utilitário para gerar códigos internos e senhas técnicas
 function genPlayerCode(len=10){
   const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out="";
@@ -129,41 +131,126 @@ function genPlayerCode(len=10){
   return out;
 }
 
-async function ensureAccessCodeForPlayer(code, playerId){
-  const c = String(code||"").toUpperCase();
-  const ref = playersCol(c).doc(playerId);
-  const snap = await ref.get();
-  if(!snap.exists) throw new Error("Jogador não encontrado.");
-  const d = snap.data() || {};
-  if(d.accessCode) return d.accessCode;
-
-  // tenta alguns códigos (baixa chance de colisão)
-  for(let k=0;k<5;k++){
-    const ac = genPlayerCode(10);
-    const q = await playersCol(c).where("accessCode","==",ac).limit(1).get();
-    if(q.empty){
-      await ref.set({ accessCode: ac, updatedAt: nowIso() }, { merge:true });
-      return ac;
-    }
-  }
-  throw new Error("Não consegui gerar um código agora. Tente novamente.");
+function normalizePlayerName(value){
+  return String(value || "").trim().replace(/\s+/g, " ");
 }
 
-async function claimPlayerByAccessCode(){
+function playerNameKey(value){
+  return normalizePlayerName(value).toLocaleLowerCase("pt-BR");
+}
+
+function playerPasswordOf(player){
+  const raw = String((player && player.password) || "").trim();
+  return raw || DEFAULT_PLAYER_PASSWORD;
+}
+
+function playerMissingProfileFields(player){
+  const missing = [];
+  const baseNote = Number(player && player.baseNote);
+  const position = String((player && player.position) || "").trim();
+  if(!(baseNote >= MIN_NOTA && baseNote <= MAX_NOTA)) missing.push("nota pessoal");
+  if(!POSICOES.includes(position)) missing.push("posição");
+  return missing;
+}
+
+function playerHasRequiredProfile(player){
+  return playerMissingProfileFields(player).length === 0;
+}
+
+function playerProfileBadge(player){
+  const missing = playerMissingProfileFields(player);
+  if(!missing.length) return "";
+  return ` · <span class="text-amber-700 font-semibold">Falta ${escapeHtml(missing.join(" e "))}</span>`;
+}
+
+function ensurePlayerProfileComplete(player){
+  const missing = playerMissingProfileFields(player);
+  if(!missing.length) return true;
+  setInfo(`<b>Complete ${escapeHtml(missing.join(" e "))}.</b> Salve sua inscrição para continuar.`);
+  return false;
+}
+
+function buildInviteMessage(nome, sala){
+  const sched = getMatchScheduleMeta();
+  const linkSala = buildRoomUrl(sala);
+  const lines = [
+    `MANCHETTE VOLLEYBALL`,
+    `ACESSO DO JOGADOR`,
+    `Nome: ${nome}`,
+    `Sala: ${sala}`,
+    `Senha: ${DEFAULT_PLAYER_PASSWORD}`,
+    linkSala ? `Link direto: ${linkSala}` : ``
+  ].filter(Boolean);
+
+  if(sched.hasSchedule) lines.push(`PARTIDA: ${sched.matchLabel}`);
+  if(state.matchLocation) lines.push(`LOCAL: ${state.matchLocation}`);
+
+  lines.push(
+    `COMO USAR (rápido):`,
+    `1) Abra o site`,
+    `2) Entre na sala ${sala}`,
+    `3) Faça login com seu nome e a senha ${DEFAULT_PLAYER_PASSWORD}`,
+    `4) Complete sua nota pessoal e posição se estiver faltando`,
+    `5) Confirme presença e escolha o time`
+  );
+
+  return lines.join("\n");
+}
+
+async function loginPlayerByNamePassword(){
   try{
     const code = state.code;
     if(!code) return alert("Entre na sala primeiro (código da partida).");
-    const acRaw = ($("accessCodeInput")?.value || "").trim().toUpperCase().replace(/\s+/g,"");
-    if(!acRaw) return alert("Digite seu Código do Jogador.");
-    const qs = await playersCol(code).where("accessCode","==",acRaw).limit(1).get();
-    if(qs.empty) return alert("Código não encontrado nesta sala. Verifique e tente novamente.");
-    const doc = qs.docs[0];
-    const d = doc.data() || {};
-    session.playerId = doc.id;
-    rememberPlayerForRoom(code, doc.id);
+
+    const rawName = normalizePlayerName($("playerLoginName")?.value || "");
+    const rawPassword = String($("playerLoginPass")?.value || "").trim();
+
+    if(!rawName) return alert("Digite seu nome.");
+    if(!rawPassword) return alert("Digite sua senha.");
+
+    const matches = Object.values(state.players || {}).filter(p => playerNameKey(p && p.name) === playerNameKey(rawName));
+    if(!matches.length) return alert("Jogador não encontrado nesta sala. Peça para o Admin adicionar seu nome.");
+    if(matches.length > 1) return alert("Há mais de um jogador com este nome nesta sala. Peça ao Admin para diferenciar os cadastros.");
+
+    const found = matches[0];
+    const expectedPassword = playerPasswordOf(found);
+    if(rawPassword !== expectedPassword) return alert("Senha do jogador inválida.");
+
+    session.playerId = found.id;
+    rememberPlayerForRoom(code, found.id);
     persistSession();
-    if($("accessCodeInput")) $("accessCodeInput").value = "";
-    setInfo(`Inscrição recuperada: ${d.name || "Jogador"}.`);
+
+    if($("playerLoginPass")) $("playerLoginPass").value = "";
+
+    if(!found.password){
+      try{
+        await setPlayer(code, { id: found.id, password: DEFAULT_PLAYER_PASSWORD, passwordUpdatedAt: nowIso() });
+      }catch(e){}
+    }
+
+    if(playerHasRequiredProfile(found)){
+      setInfo(`Acesso liberado para <b>${escapeHtml(found.name || "Jogador")}</b>.`);
+    }else{
+      setInfo(`<b>${escapeHtml(found.name || "Jogador")}</b>, complete sua nota pessoal e posição para continuar.`);
+    }
+    render();
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }
+}
+
+async function resetPlayerPasswordByAdmin(playerId, playerName){
+  if(!session.admin) return alert("Somente admin.");
+  const name = String(playerName || "Jogador");
+  const ok = confirm(`Resetar a senha de ${name} para ${DEFAULT_PLAYER_PASSWORD}?`);
+  if(!ok) return;
+  try{
+    await setPlayer(state.code, { id: playerId, password: DEFAULT_PLAYER_PASSWORD, passwordUpdatedAt: nowIso() });
+    if(state.players && state.players[playerId]){
+      state.players[playerId] = Object.assign({}, state.players[playerId], { password: DEFAULT_PLAYER_PASSWORD, passwordUpdatedAt: nowIso() });
+    }
+    setInfo(`Senha de ${name} resetada para ${DEFAULT_PLAYER_PASSWORD}.`);
+    render();
   }catch(e){
     setSyncError(e && e.message ? e.message : e);
   }
@@ -1064,12 +1151,10 @@ async function ensureMeLoaded(){
 }
 
 function autoRestorePlayerSessionFromDevice(forceInfo = false){
-  if(accessMode() !== "player") return null;
   if(session.playerId || session.prevPlayerId) return null;
   const rememberedId = getRememberedPlayerIdForRoom(state.code);
-  let found = null;
-  if(rememberedId && state.players && state.players[rememberedId]) found = state.players[rememberedId];
-  if(!found) found = findRegisteredPlayerForThisDevice(state.players || {});
+  if(!rememberedId) return null;
+  const found = state.players && state.players[rememberedId] ? state.players[rememberedId] : null;
   if(found && found.id){
     session.playerId = found.id;
     rememberPlayerForRoom(state.code, found.id);
@@ -1086,23 +1171,7 @@ async function resolveExistingRegistrationForThisDevice(code){
 
   const rememberedId = getRememberedPlayerIdForRoom(roomCode);
   if(rememberedId){
-    if(state.players && state.players[rememberedId]){
-      return state.players[rememberedId];
-    }
-  }
-
-  // 🔒 BLOQUEIO REAL POR APARELHO
-  const deviceId = getDeviceId();
-
-  const sameDevicePlayer = Object.values(state.players || {})
-    .find(p => p.deviceId && p.deviceId === deviceId);
-
-  if(sameDevicePlayer){
-    return sameDevicePlayer;
-  }
-
-  return null;
-}
+    if(state.players && state.players[rememberedId]) return state.players[rememberedId];
     if(db){
       try{
         const snap = await playersCol(roomCode).doc(rememberedId).get();
@@ -1111,31 +1180,10 @@ async function resolveExistingRegistrationForThisDevice(code){
           state.players[rememberedId] = data;
           rememberPlayerForRoom(roomCode, rememberedId);
           return data;
-        } else {
-          forgetPlayerForRoom(roomCode);
         }
+        forgetPlayerForRoom(roomCode);
       }catch(e){}
     }
-  }
-
-  const sameDevice = findRegisteredPlayerForThisDevice(state.players || {});
-  if(sameDevice && sameDevice.id){
-    rememberPlayerForRoom(roomCode, sameDevice.id);
-    return sameDevice;
-  }
-
-  const deviceId = getDeviceId();
-  if(deviceId && db){
-    try{
-      const qs = await playersCol(roomCode).where("deviceId", "==", deviceId).limit(1).get();
-      if(qs && !qs.empty){
-        const doc = qs.docs[0];
-        const data = doc.data() || {};
-        state.players[doc.id] = data;
-        rememberPlayerForRoom(roomCode, doc.id);
-        return data;
-      }
-    }catch(e){}
   }
 
   return null;
@@ -2133,7 +2181,15 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
 
     async function setPlayer(code, player){
       const c = String(code||"").toUpperCase();
-      await playersCol(c).doc(player.id).set(player, { merge:true });
+      const payload = Object.assign({}, player || {});
+      if(payload.name != null){
+        payload.name = normalizePlayerName(payload.name);
+        payload.nameLower = playerNameKey(payload.name);
+      }
+      if(payload.password != null){
+        payload.password = String(payload.password || DEFAULT_PLAYER_PASSWORD).trim() || DEFAULT_PLAYER_PASSWORD;
+      }
+      await playersCol(c).doc(payload.id).set(payload, { merge:true });
       await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
     }
 
@@ -2357,7 +2413,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
           ? "<b>Entrou na sala como Desenvolvedor.</b> Você tem visão e controle avançado desta sala."
           : mode === "admin"
             ? "<b>Entrou na sala como Admin.</b> Os controles administrativos já estão liberados."
-            : "<b>Entrou na sala.</b> Entre com seu Código do Jogador ou faça a inscrição se for um novo jogador.";
+            : "<b>Entrou na sala.</b> Faça login com seu nome e senha. Jogadores antigos usam 123456.";
         setInfo(entryMsg);
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -2414,147 +2470,77 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
     // ===============================
     // Jogador
     // ===============================
-    async function registerMe(){
-      try{
-        const code = state.code;
-        if(!code) return;
-        if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+    async function createPlayerByAdmin(opts = {}){
+      const code = state.code;
+      if(!code) throw new Error("Entre em uma sala primeiro (código da partida).");
+      if(!session.admin) throw new Error("Somente Admin pode adicionar jogador.");
 
-        const addingAnother = !!session.prevPlayerId;
+      const name = normalizePlayerName($("playerName")?.value || "");
+      const baseNote = Number($("playerNote")?.value || 0);
+      const position = String($("playerPos")?.value || "").trim();
 
-        // Bloqueia nova inscrição quando já está logado neste aparelho
-        const already = me();
-        if(already){
-          return alert("Você já está logado. Para mudar seus dados use 'Atualizar minha inscrição' ou 'Sair da lista'. Para inscrever outra pessoa, use 'Adicionar jogador'.");
-        }
+      if(!name) throw new Error("Digite o nome do jogador.");
+      if(!(baseNote >= MIN_NOTA && baseNote <= MAX_NOTA)) throw new Error("Escolha a nota pessoal do jogador.");
+      if(!POSICOES.includes(position)) throw new Error("Escolha a posição do jogador.");
 
-        if(!addingAnother){
-          const sameRegistration = await resolveExistingRegistrationForThisDevice(code);
-          if(sameRegistration && sameRegistration.id){
-            session.playerId = sameRegistration.id;
-            rememberPlayerForRoom(code, sameRegistration.id);
-            persistSession();
-            render();
-            return alert("Este celular já possui uma inscrição nesta sala. Recupere esse acesso. Para inscrever outra pessoa, entre primeiro no seu jogador e use 'Adicionar jogador'.");
-          }
-        }
+      const duplicate = Object.values(state.players || {}).find(p => playerNameKey(p && p.name) === playerNameKey(name));
+      if(duplicate) throw new Error("Já existe um jogador com este nome nesta sala. Use outro nome ou ajuste o cadastro existente.");
 
-        const name = ($("playerName")?.value || "").trim();
-        const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
-        const position = ($("playerPos")?.value || "Coringa");
+      const id = safeId();
+      const player = {
+        id,
+        name,
+        nameLower: playerNameKey(name),
+        baseNote,
+        position,
+        password: DEFAULT_PLAYER_PASSWORD,
+        passwordUpdatedAt: nowIso(),
+        createdAt: nowIso(),
+        createdByAdmin: true
+      };
 
-        if(!name) return alert("Digite seu nome.");
-        if(!state.open) return alert("Inscrição fechada.");
-
-        const id = safeId();
-        const accessCode = genPlayerCode(10);
-          
-        const player = {
-  id,
-  name,
-  baseNote,
-  position,
-  accessCode,
-  deviceId: getDeviceId(), // ← SEMPRE grava o aparelho
-  createdAt: nowIso()
-};
-
-        session.playerId = id;
-        rememberPlayerForRoom(code, id);
-        persistSession();
-
-        await setPlayer(code, player);
-
-        // ✅ ao cadastrar, já confirma presença na rodada atual (jogar hoje)
+      await setPlayer(code, player);
+      if(state.activeRoundId){
         await setAttendance(code, state.activeRoundId, id, {
-          present: true,
+          present: false,
           team: null,
-          checkedInAtMs: nowMs(),
+          checkedInAtMs: null,
           updatedAt: nowIso()
         });
+      }
 
-        if($("playerName")) $("playerName").value = "";
-        setInfo("Você entrou na lista e confirmou presença (jogar hoje). Seu Código do Jogador: " + accessCode + " (guarde para entrar em outro celular/PC).");
+      if($("playerName")) $("playerName").value = "";
+      if($("playerNote")) $("playerNote").value = "";
+      if($("playerPos")) $("playerPos").value = "";
+
+      if(session.prevPlayerId){
+        session.playerId = session.prevPlayerId;
+        session.prevPlayerId = "";
+        rememberPlayerForRoom(code, session.playerId);
+      }
+      persistSession();
+
+      if(opts.openWhatsApp){
+        openWhatsAppWithText(buildInviteMessage(player.name, String(code).toUpperCase()));
+      }
+
+      return player;
+    }
+
+    async function registerMe(){
+      try{
+        const player = await createPlayerByAdmin({ openWhatsApp:false });
+        setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado com senha padrão ${DEFAULT_PLAYER_PASSWORD}.`);
+        render();
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
 async function registerMeSendWhatsApp(){
-  // Abre uma janela antes (evita bloqueio de popup em alguns navegadores)
-  const pre = window.open("about:blank", "_blank");
-
   try{
-    const code = state.code;
-    if(!code){ if(pre) pre.close(); return alert("Entre na sala primeiro (código da partida)."); }
-    if(!state.activeRoundId){ if(pre) pre.close(); return alert("Rodada não carregou. Recarregue a página."); }
-
-    // ✅ Se já está logado: apenas envia os dados no WhatsApp (não cadastra de novo)
-    const logged = me();
-    if(logged){
-      let accessCode = logged.accessCode;
-      if(!accessCode){
-        // gera se estiver vazio (caso antigo)
-        accessCode = await ensureAccessCodeForPlayer(code, logged.id);
-      }
-      const msg = buildInviteMessage(logged.name || "Jogador", String(code).toUpperCase(), String(accessCode));
-      const url = "https://wa.me/?text=" + encodeURIComponent(msg);
-      if(pre) pre.location.href = url;
-      else window.open(url, "_blank");
-      setInfo("WhatsApp aberto com sua mensagem pronta. Agora é só tocar em ENVIAR.");
-      return;
-    }
-
-    const addingAnother = !!session.prevPlayerId;
-    if(!addingAnother){
-      const sameRegistration = await resolveExistingRegistrationForThisDevice(code);
-      if(sameRegistration && sameRegistration.id){
-        session.playerId = sameRegistration.id;
-        rememberPlayerForRoom(code, sameRegistration.id);
-        persistSession();
-        render();
-        if(pre) try{ pre.close(); }catch{}
-        return alert("Este celular já possui uma inscrição nesta sala. Recupere esse acesso. Para inscrever outra pessoa, entre primeiro no seu jogador e use 'Adicionar jogador'.");
-      }
-    }
-
-    // ✅ Se NÃO está logado: cadastra e já abre WhatsApp
-    const name = ($("playerName")?.value || "").trim();
-    const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
-    const position = ($("playerPos")?.value || "Coringa");
-
-    if(!name) { if(pre) pre.close(); return alert("Digite seu nome."); }
-    if(!state.open) { if(pre) pre.close(); return alert("Inscrição fechada."); }
-
-    const id = safeId();
-    const accessCode = genPlayerCode(10);
-
-    const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
-    if(!addingAnother) player.deviceId = getDeviceId();
-
-    session.playerId = id;
-    rememberPlayerForRoom(code, id);
-    persistSession();
-
-    await setPlayer(code, player);
-
-    await setAttendance(code, state.activeRoundId, id, {
-      present: true,
-      team: null,
-      checkedInAtMs: nowMs(),
-      updatedAt: nowIso()
-    });
-
-    // limpa campos
-    if($("playerName")) $("playerName").value = "";
-
-    // monta mensagem e abre WhatsApp
-    const msg = buildInviteMessage(name, String(code).toUpperCase(), accessCode);
-    const url = "https://wa.me/?text=" + encodeURIComponent(msg);
-    if(pre) pre.location.href = url;
-    else window.open(url, "_blank");
-
-    setInfo("Inscrição criada. Código do Jogador: " + accessCode + " — WhatsApp aberto com a mensagem pronta. Agora é só tocar em ENVIAR.");
+    const player = await createPlayerByAdmin({ openWhatsApp:true });
+    setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado. O WhatsApp foi aberto com a senha padrão ${DEFAULT_PLAYER_PASSWORD}.`);
+    render();
   }catch(e){
-    if(pre) try{ pre.close(); }catch{}
     setSyncError(e && e.message ? e.message : e);
   }
 }
@@ -2566,10 +2552,13 @@ async function registerMeSendWhatsApp(){
       if(!code || !m) return;
 
       try{
-        const name = String($("myNameInput")?.value || m.name || "").trim();
+        const name = normalizePlayerName($("myNameInput")?.value || m.name || "");
         if(!name || name.length < 2) return alert("Informe um nome válido (mín. 2 letras).");
-        const baseNote = clamp(Number($("myNoteSelect")?.value || m.baseNote || 5), MIN_NOTA, MAX_NOTA);
-        const position = ($("myPosSelect")?.value || m.position || "Coringa");
+        const baseNoteRaw = $("myNoteSelect")?.value || "";
+        const position = String($("myPosSelect")?.value || "").trim();
+        if(!baseNoteRaw) return alert("Escolha sua nota pessoal.");
+        if(!position) return alert("Escolha sua posição.");
+        const baseNote = clamp(Number(baseNoteRaw), MIN_NOTA, MAX_NOTA);
 
         await setPlayer(code, { id: m.id, name, baseNote, position, updatedAt: nowIso() });
         setInfo("Inscrição atualizada (nome/nota/posição).");
@@ -2583,14 +2572,15 @@ async function registerMeSendWhatsApp(){
 function startAddPlayer(){
   const code = state.code;
   if(!code) return alert("Entre em uma sala primeiro (código da partida).");
+  if(!session.admin) return alert("Somente Admin pode adicionar jogador.");
   if(session.playerId) session.prevPlayerId = session.playerId;
   session.playerId = "";
   persistSession();
   // limpa o formulário de cadastro
   if($("playerName")) $("playerName").value = "";
-  if($("playerNote")) $("playerNote").value = "5";
-  if($("playerPos")) $("playerPos").value = "Coringa";
-  setInfo("Modo adicionar jogador: inscreva a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
+  if($("playerNote")) $("playerNote").value = "";
+  if($("playerPos")) $("playerPos").value = "";
+  setInfo(`Modo adicionar jogador: cadastre a pessoa e informe a senha padrão ${DEFAULT_PLAYER_PASSWORD}.`);
   render();
   try{ window.scrollTo({top: 0, behavior: "smooth"}); }catch{ window.scrollTo(0,0); }
 }
@@ -2608,12 +2598,10 @@ function backToPrevPlayer(){
 }
 
 function recoverMyAccessFromDevice(){
-  let found = findRegisteredPlayerForThisDevice(state.players || {});
-  if(!found || !found.id){
-    const rememberedId = getRememberedPlayerIdForRoom(state.code);
-    if(rememberedId && state.players && state.players[rememberedId]) found = state.players[rememberedId];
-  }
-  if(!found || !found.id) return alert("Não encontrei uma inscrição deste aparelho nesta sala.");
+  let found = null;
+  const rememberedId = getRememberedPlayerIdForRoom(state.code);
+  if(rememberedId && state.players && state.players[rememberedId]) found = state.players[rememberedId];
+  if(!found || !found.id) return alert("Não encontrei um acesso salvo neste aparelho para esta sala.");
   session.playerId = found.id;
   rememberPlayerForRoom(state.code, found.id);
   persistSession();
@@ -2641,6 +2629,7 @@ async function markPresence(present){
       }
       if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
       if(!state.open) return alert("Inscrição fechada.");
+      if(!ensurePlayerProfileComplete(m)) return alert("Complete sua nota pessoal e posição antes de confirmar presença.");
 
       try{
         rememberPlayerForRoom(code, m.id);
@@ -2683,10 +2672,11 @@ async function markPresence(present){
             render();
             return alert("Recupere seu acesso nesta sala antes de escolher time.");
           }
-          return alert("Inscreva-se para escolher time.");
+          return alert("Faça login para escolher time.");
         }
         if(!state.open) return alert("Inscrição fechada.");
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+        if(!ensurePlayerProfileComplete(m)) return alert("Complete sua nota pessoal e posição antes de escolher time.");
         if(!isPresent(m.id)) return alert("Confirme presença antes de escolher time.");
 
         const byTarget = byTargetScores(state.ratings);
@@ -2928,7 +2918,7 @@ async function randomizeTeams(){
     // ===============================
     function openRatingModal(){
       const m = me();
-      if(!m) return alert("Inscreva-se para avaliar.");
+      if(!m) return alert("Faça login para avaliar.");
       // Não exigimos presença para avaliar (permite avaliar mesmo após "Nova rodada").
 
       $("ratingBack").classList.remove("hidden");
@@ -2953,7 +2943,8 @@ async function randomizeTeams(){
       try{
         let m = me();
         if(!m) m = await ensureMeLoaded();
-        if(!m) return alert("Inscreva-se para avaliar.");
+        if(!m) return alert("Faça login para avaliar.");
+        if(!ensurePlayerProfileComplete(m)) return alert("Complete sua nota pessoal e posição antes de avaliar.");
         const scoreFromProfile = clamp(Number(document.getElementById("myNoteSelect")?.value || m.baseNote || RATE_BASELINE), MIN_NOTA, MAX_NOTA);
         if(!hasSelfRatedCurrentRound(m)){
           await markSelfRatedNow(m, scoreFromProfile);
@@ -3101,41 +3092,7 @@ async function randomizeTeams(){
       }
     }
 
-    function buildInviteMessage(nome, sala, codigoJogador){
-  const sched = getMatchScheduleMeta();
-  const linkSala = buildRoomUrl(sala);
-  const lines = [
-    `MANCHETTE VOLLEYBALL`,
-    `SEU ACESSO`,
-    `Nome: ${nome}`,
-    `Sala: ${sala}`,
-    `Código do Jogador: ${codigoJogador}`,
-    linkSala ? `Link direto: ${linkSala}` : ``
-  ];
-
-  if(sched.hasSchedule){
-    lines.push(`PARTIDA: ${sched.matchLabel}`);
-  }
-  if(state.matchLocation){
-    lines.push(`LOCAL: ${state.matchLocation}`);
-  }
-
-  lines.push(
-    `COMO USAR (rápido): `,
-    `1) Abra o site`,
-    ` 2) Clique em ENTRAR e digite o código da sala: ${sala}`,
-    `3) Em "Já se inscreveu?", digite o seu Código do Jogador: ${codigoJogador}`,
-    `4) Confirme PRESENÇA `,
-    `5) Escolha o TIME (1 ou 2) `,
-    `6) Avalie jogadores (nota oculta 5–10) `,
-    `DICA: - A "Minha nota" é sua autoavaliação (5–10). - Você pode atualizar depois em "Atualizar minha inscrição".`
-  );
-
-  return lines.join("\n");
-}
-
-
-function openWhatsApp(text, numberDigits){
+    function openWhatsApp(text, numberDigits){
   const base = numberDigits ? ("https://wa.me/" + numberDigits + "?text=") : "https://wa.me/?text=";
   window.open(base + encodeURIComponent(text), "_blank");
 }
@@ -3299,11 +3256,14 @@ function openWhatsApp(text, numberDigits){
         actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
+      if(isAdmin){
+        actions.push(`<button data-admin-resetpass="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-200 text-[11px] font-semibold">Resetar senha</button>`);
+      }
       return `
         <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
             <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
-            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml((p.position || "Sem posição"))} · Nota ${note}${playerProfileBadge(p)}</div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             ${you}
@@ -3323,11 +3283,14 @@ function openWhatsApp(text, numberDigits){
         actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
+      if(isAdmin){
+        actions.push(`<button data-admin-resetpass="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-200 text-[11px] font-semibold">Resetar senha</button>`);
+      }
       return `
         <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
             <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
-            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml((p.position || "Sem posição"))} · Nota ${note}${playerProfileBadge(p)}</div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : (isAdmin ? "Admin pode definir o time." : "Apenas o próprio jogador escolhe.")}</div>
@@ -3346,11 +3309,14 @@ function openWhatsApp(text, numberDigits){
         actions.push(`<button data-admin-present="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-green-100 text-green-800 hover:bg-green-200 text-[11px] font-semibold">Marcar presença</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
+      if(isAdmin){
+        actions.push(`<button data-admin-resetpass="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-200 text-[11px] font-semibold">Resetar senha</button>`);
+      }
       return `
         <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
             <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
-            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml((p.position || "Sem posição"))} · Nota ${note}${playerProfileBadge(p)}</div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             ${you}
@@ -3448,94 +3414,77 @@ function openWhatsApp(text, numberDigits){
 
 
     function renderPlayerAccessBlock({ meObj, myNote, myPresent, myTeam, mySelfRated, team1Count, team2Count, remaining1, remaining2, waiting, fullTeams, bMsg }){
-      const hasPlayerSession = accessMode() === "player" && !!session.playerId;
       const rememberedPlayerId = getRememberedPlayerIdForRoom(state.code);
-      const deviceRegistered = accessMode() === "player" && (!!findRegisteredPlayerForThisDevice(state.players || {}) || !!rememberedPlayerId);
-
-      if((hasPlayerSession || deviceRegistered) && !meObj){
-        return `
-          <div class="rounded-xl border bg-blue-50 p-3">
-            <div class="text-sm font-extrabold text-blue-800">Reconectando seu acesso</div>
-            <div class="mt-1 text-xs text-blue-700">Este celular já tem uma inscrição salva nesta sala. Aguarde alguns segundos ou toque abaixo para recuperar agora.</div>
-            <button id="btnReconnectMe" class="mt-3 w-full px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
-              Recuperar meu acesso
-            </button>
-          </div>
-        `;
-      }
+      const canAddPlayer = !!session.admin;
+      const profileIncomplete = meObj ? !playerHasRequiredProfile(meObj) : false;
 
       if(!meObj){
-        if(!session.prevPlayerId && deviceRegistered){
-          return `
-            <div class="rounded-xl border bg-amber-50 p-3 text-sm text-amber-800">
-              Este celular já possui uma inscrição nesta sala. Recupere seu acesso abaixo. Para cadastrar outra pessoa neste aparelho, entre primeiro na sua inscrição e use <b>Adicionar jogador</b>.
-            </div>
-            <div class="mt-3 rounded-xl border bg-blue-50 p-3">
+        return `
+          ${rememberedPlayerId ? `
+            <div class="rounded-xl border bg-blue-50 p-3">
               <div class="text-sm font-extrabold text-blue-800">Recuperar meu acesso</div>
-              <div class="mt-1 text-xs text-blue-700">Use seu Código do Jogador ou toque no botão para recuperar automaticamente a inscrição deste aparelho.</div>
-              <div class="mt-2 flex flex-col sm:flex-row gap-2">
-                <button id="btnReconnectMe" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
-                  Recuperar automaticamente
+              <div class="mt-1 text-xs text-blue-700">Este aparelho já possui um jogador salvo nesta sala.</div>
+              <button id="btnReconnectMe" class="mt-3 w-full px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
+                Entrar com acesso salvo
+              </button>
+            </div>
+          ` : ``}
+
+          <div class="rounded-xl border bg-blue-50 p-3">
+            <div class="text-sm font-extrabold text-blue-800">Entrar como jogador</div>
+            <div class="mt-1 text-xs text-blue-700">Use seu nome exatamente como foi cadastrado pelo Admin e sua senha. Jogadores antigos entram com <b>${DEFAULT_PLAYER_PASSWORD}</b>.</div>
+            <div class="mt-3 grid gap-2">
+              <input id="playerLoginName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
+              <input id="playerLoginPass" type="password" placeholder="Sua senha" class="px-3 py-2 rounded-lg border" />
+              <button id="btnPlayerPasswordLogin" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
+                Entrar no meu jogador
+              </button>
+            </div>
+          </div>
+
+          ${canAddPlayer ? `
+            <div class="mt-3 rounded-xl border bg-gray-50 p-3">
+              <div class="text-sm font-extrabold text-gray-800">Adicionar jogador</div>
+              <div class="mt-1 text-xs text-gray-600">Somente Admin. A senha inicial do jogador será <b>${DEFAULT_PLAYER_PASSWORD}</b>.</div>
+              <div class="mt-3 grid gap-2">
+                <input id="playerName" placeholder="Nome do jogador" class="px-3 py-2 rounded-lg border" />
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <select id="playerNote" class="px-3 py-2 rounded-lg border">
+                    <option value="" selected>Selecione a nota pessoal</option>
+                    <option value="5">Minha nota 5</option>
+                    <option value="6">Minha nota 6</option>
+                    <option value="7">Minha nota 7</option>
+                    <option value="8">Minha nota 8</option>
+                    <option value="9">Minha nota 9</option>
+                    <option value="10">Minha nota 10</option>
+                  </select>
+                  <select id="playerPos" class="px-3 py-2 rounded-lg border">
+                    <option value="" selected>Selecione a posição</option>
+                    ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
+                  </select>
+                </div>
+                <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold">
+                  Adicionar jogador
+                </button>
+                <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold">
+                  📲 Adicionar e enviar acesso
                 </button>
               </div>
-              <div class="mt-2 flex gap-2">
-                <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
-                <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
-              </div>
             </div>
-          `;
-        }
-
-        return `
-          <div class="grid gap-2">
-            <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
-
-            <div class="grid gap-1">
-              <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
-              <div class="grid grid-cols-2 gap-2">
-                <select id="playerNote" class="px-3 py-2 rounded-lg border">
-                  <option value="5" selected>Minha nota 5</option>
-                  <option value="6">Minha nota 6</option>
-                  <option value="7">Minha nota 7</option>
-                  <option value="8">Minha nota 8</option>
-                  <option value="9">Minha nota 9</option>
-                  <option value="10">Minha nota 10</option>
-                </select>
-                <select id="playerPos" class="px-3 py-2 rounded-lg border">
-                  ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
-                </select>
-              </div>
-            </div>
-
-            <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
-              Entrar na lista
-            </button>
-
-            <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
-              📲 Enviar Inscrição
-            </button>
-          </div>
+          ` : `
+            <div class="mt-3 text-xs text-gray-500">Seu cadastro deve ser criado pelo Admin da sala.</div>
+          `}
 
           ${session.prevPlayerId ? `
             <button id="btnBackToMe" class="mt-3 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
               Voltar para meu jogador
             </button>
           ` : ``}
-
-          <div class="mt-3 rounded-xl border bg-gray-50 p-3">
-            <div class="text-sm font-extrabold text-gray-800">Já se inscreveu?</div>
-            <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar sua inscrição neste aparelho.</div>
-            <div class="mt-2 flex gap-2">
-              <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
-              <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
-            </div>
-          </div>
-          <div class="text-xs text-gray-500 mt-2">Dica: ao se inscrever, anote seu Código do Jogador.</div>
         `;
       }
 
       return `
-        <div class="text-xs text-gray-600">Você já está logado. Para inscrever outra pessoa, use <b>Adicionar jogador</b>.</div>
+        <div class="text-xs text-gray-600">Logado por nome + senha.</div>
 
         <div class="text-sm text-gray-700">
           Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
@@ -3543,8 +3492,14 @@ function openWhatsApp(text, numberDigits){
           ${myTeam ? ` · Time ${myTeam}` : ``}
         </div>
 
+        ${profileIncomplete ? `
+          <div class="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <b>Complete sua nota pessoal e posição.</b> Sem isso, presença, time e avaliação ficam bloqueados.
+          </div>
+        ` : ``}
+
         <div class="mt-2 flex gap-2">
-          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
+          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent && !profileIncomplete) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent && !profileIncomplete) ? "" : "disabled"}>
             Confirmar presença
           </button>
           <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
@@ -3552,24 +3507,24 @@ function openWhatsApp(text, numberDigits){
           </button>
         </div>
 
-        <div class="mt-2 grid grid-cols-2 gap-2">
-          <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
-            Adicionar jogador
-          </button>
+        <div class="mt-2 grid ${canAddPlayer ? "grid-cols-2" : "grid-cols-1"} gap-2">
+          ${canAddPlayer ? `
+            <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
+              Adicionar jogador
+            </button>
+          ` : ``}
           ${session.prevPlayerId ? `
             <button id="btnBackToMe2" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
               Voltar para meu jogador
             </button>
-          ` : `
-            <button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>
-              Voltar para meu jogador
-            </button>
-          `}
+          ` : `${canAddPlayer ? `<button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>Voltar para meu jogador</button>` : ``}`}
         </div>
 
-        <div class="mt-1 text-xs text-gray-600">
-          Dica: use <b>Adicionar jogador</b> para inscrever alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
-        </div>
+        ${canAddPlayer ? `
+          <div class="mt-1 text-xs text-gray-600">
+            Somente Admin pode adicionar jogador. Novos acessos começam com a senha <b>${DEFAULT_PLAYER_PASSWORD}</b>.
+          </div>
+        ` : ``}
 
         <div class="border-t pt-3">
           <div class="grid gap-2">
@@ -3578,8 +3533,8 @@ function openWhatsApp(text, numberDigits){
             </div>
 
             <div class="flex flex-wrap gap-2">
-              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
-              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
+              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
+              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
             </div>
 
             <div class="text-xs text-gray-600">
@@ -3588,7 +3543,7 @@ function openWhatsApp(text, numberDigits){
               <span class="font-semibold">${waiting.length}</span> em espera
             </div>
 
-            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">Dar nota / avaliar jogadores</button>
+            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${profileIncomplete ? "opacity-50 cursor-not-allowed" : ""}" ${profileIncomplete ? "disabled" : ""}>Dar nota / avaliar jogadores</button>
           </div>
 
           ${bMsg.text ? `
@@ -3605,34 +3560,23 @@ function openWhatsApp(text, numberDigits){
           </div>
           <div class="mt-2 grid grid-cols-2 gap-2">
             <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
-              ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
+              <option value="">Selecione a nota pessoal</option>
+              ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${Number(meObj.baseNote)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
             </select>
             <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
-              ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"Coringa")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
+              <option value="">Selecione a posição</option>
+              ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
             </select>
           </div>
           <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
             Salvar inscrição
           </button>
-          <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
-        </div>
-
-        <div class="mt-3 rounded-xl border bg-white p-3">
-          <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
-          <div class="mt-1 text-xs text-gray-500">Use este código para entrar na mesma inscrição em outro celular/PC.</div>
-          <div class="mt-2 flex items-center gap-2">
-            <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
-              ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
-            </div>
-            <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
-              Copiar
-            </button>
-          </div>
-          ${!meObj.accessCode ? `
-            <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
-              Gerar meu código
+          ${session.admin ? `
+            <button id="btnResetMyPlayerPassword" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
+              Resetar minha senha para ${DEFAULT_PLAYER_PASSWORD}
             </button>
           ` : ``}
+          <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
         </div>
 
         <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
@@ -3683,7 +3627,6 @@ function openWhatsApp(text, numberDigits){
       const myPresent = meObj ? isPresent(meObj.id) : false;
       const myTeam = meObj ? teamOf(meObj.id) : null;
       const mySelfRated = meObj ? hasSelfRatedCurrentRound(meObj) : false;
-      const hasPlayerSession = accessMode() === "player" && !!session.playerId;
 
       const presentPlayers = playersArr.filter(p=> isPresent(p.id));
       const team1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1);
@@ -4077,22 +4020,9 @@ function openWhatsApp(text, numberDigits){
         if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
         if($("btnRegisterSendWA")) $("btnRegisterSendWA").onclick = ()=> registerMeSendWhatsApp();
         if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
-
-if($("btnCopyMyAccessCode")) $("btnCopyMyAccessCode").onclick = ()=> {
-  const m = me();
-  if(m && m.accessCode) copyText(String(m.accessCode));
-};
-if($("btnGenMyAccessCode")) $("btnGenMyAccessCode").onclick = async ()=> {
-  const m = me();
-  if(!m) return;
-  try{
-    const ac = await ensureAccessCodeForPlayer(state.code, m.id);
-    setInfo("Código gerado: " + ac);
-  }catch(e){
-    setSyncError(e && e.message ? e.message : e);
-  }
-};
-if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerByAccessCode();
+        if($("btnPlayerPasswordLogin")) $("btnPlayerPasswordLogin").onclick = ()=> loginPlayerByNamePassword();
+        if($("btnReconnectMe")) $("btnReconnectMe").onclick = ()=> recoverMyAccessFromDevice();
+        if($("btnResetMyPlayerPassword")) $("btnResetMyPlayerPassword").onclick = ()=> { const m = me(); if(m) resetPlayerPasswordByAdmin(m.id, m.name); };
 
         if($("btnAddPlayer")) $("btnAddPlayer").onclick = ()=> startAddPlayer();
         if($("btnBackToMe")) $("btnBackToMe").onclick = ()=> backToPrevPlayer();
@@ -4317,6 +4247,13 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
               adminChoosePlayerTeam(pid, nm, null);
             });
           });
+          document.querySelectorAll("[data-admin-resetpass]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-resetpass");
+              const nm = btn.getAttribute("data-name") || "Jogador";
+              resetPlayerPasswordByAdmin(pid, nm);
+            });
+          });
         }
   } else {
     // Prefill do último código (não entra automaticamente)
@@ -4414,7 +4351,7 @@ window.addEventListener("unhandledrejection", (ev)=>{
         joinRoomByCode(roomFromQuery);
       }else{
         const rememberedRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, ""));
-        if(rememberedRoom && ((accessMode() === "player" && !!session.playerId) || accessMode() === "developer")){
+        if(rememberedRoom && (((accessMode() === "player" || accessMode() === "admin") && !!session.playerId) || accessMode() === "developer")){
           joinRoomByCode(rememberedRoom);
         }
       }
