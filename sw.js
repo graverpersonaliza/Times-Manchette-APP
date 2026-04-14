@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-ui-ajustes-v6-20260404";
+const CACHE_NAME = "manchette-release-1-0-0-20260408";
 const ASSETS = [
   "./",
   "./index.html",
