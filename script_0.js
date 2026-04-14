@@ -25,8 +25,8 @@
     const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
 
     // Admin (não exibimos a senha em lugar nenhum)
-    const ADMIN_PASS = "admin123"; // troque se quiser
-    const DEVELOPER_PASS = "Noecreate2026"; // troque antes de publicar
+    const ADMIN_PASS = "admin123";
+    const DEVELOPER_PASS = "";
 
     // Escalas
     const MIN_NOTA = 5, MAX_NOTA = 10;
@@ -51,8 +51,8 @@
       bloqueado: "Bloqueado"
     };
 
-    const APP_VERSION = "1.0.0";
-    const APP_BUILD = "2026-04-08";
+    const APP_VERSION = "1.1.0";
+    const APP_BUILD = "2026-04-14-auth-backend";
     const APP_NAME = "Manchette Volleyball";
 
     // ===============================
@@ -101,6 +101,12 @@
     };
 
     let db = null;
+    let auth = null;
+    let fns = null;
+    let currentFirebaseUser = null;
+    let authReadyResolved = false;
+    let authReadyResolve = ()=>{};
+    const authReadyPromise = new Promise((resolve)=>{ authReadyResolve = resolve; });
     let unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
     let liveNotify = { roomCode:"", playersReady:false, attendanceReady:false, players:{}, attendance:{}, lastKey:"", lastAt:0 };
 
@@ -149,6 +155,7 @@ function playerPasswordOf(player){
 }
 
 function playerNeedsPasswordSetup(player){
+  if(player && typeof player.passwordNeedsSetup === "boolean") return !!player.passwordNeedsSetup;
   const raw = String((player && player.password) || "").trim();
   return !raw || raw === DEFAULT_PLAYER_PASSWORD;
 }
@@ -159,6 +166,45 @@ function validatePlayerPassword(value){
   if(pass.length > 30) return "A nova senha pode ter no máximo 30 caracteres.";
   if(/\s/.test(pass)) return "A senha não pode conter espaços.";
   return "";
+}
+
+function markAuthReady(){
+  if(authReadyResolved) return;
+  authReadyResolved = true;
+  authReadyResolve();
+}
+
+async function ensureFirebaseClientReady(){
+  await authReadyPromise;
+  if(!auth || !currentFirebaseUser) throw new Error("A autenticação do Firebase ainda não ficou pronta.");
+  return currentFirebaseUser;
+}
+
+async function refreshDeveloperModeFromClaims(force = false){
+  if(!auth || !auth.currentUser) return;
+  try{
+    const tokenResult = force ? await auth.currentUser.getIdTokenResult(true) : await auth.currentUser.getIdTokenResult();
+    const developer = !!(tokenResult && tokenResult.claims && tokenResult.claims.developer);
+    if(developer && !session.developer){
+      session.role = "developer";
+      session.developer = true;
+      session.admin = true;
+      persistSession();
+    }else if(!developer && session.developer){
+      session.role = "player";
+      session.developer = false;
+      session.admin = false;
+      persistSession();
+    }
+  }catch{}
+}
+
+async function callBackend(name, payload = {}){
+  await ensureFirebaseClientReady();
+  if(!fns) throw new Error("Cloud Functions não foi inicializado.");
+  const callable = fns.httpsCallable(name);
+  const result = await callable(payload || {});
+  return result && result.data ? result.data : {};
 }
 
 function ensurePlayerPasswordReady(player){
@@ -225,6 +271,7 @@ async function loginPlayerByNamePassword(){
   try{
     const code = state.code;
     if(!code) return alert("Entre na sala primeiro (código da partida).");
+    await ensureFirebaseClientReady();
 
     const rawName = normalizePlayerName($("playerLoginName")?.value || "");
     const rawPassword = String($("playerLoginPass")?.value || "").trim();
@@ -232,33 +279,27 @@ async function loginPlayerByNamePassword(){
     if(!rawName) return alert("Digite seu nome.");
     if(!rawPassword) return alert("Digite sua senha.");
 
-    const matches = Object.values(state.players || {}).filter(p => playerNameKey(p && p.name) === playerNameKey(rawName));
-    if(!matches.length) return alert("Jogador não encontrado nesta sala. Peça para o Admin adicionar seu nome.");
-    if(matches.length > 1) return alert("Há mais de um jogador com este nome nesta sala. Peça ao Admin para diferenciar os cadastros.");
+    const result = await callBackend("playerLogin", {
+      code,
+      name: rawName,
+      password: rawPassword
+    });
 
-    const found = matches[0];
-    const expectedPassword = playerPasswordOf(found);
-    if(rawPassword !== expectedPassword) return alert("Senha do jogador inválida.");
-
-    session.playerId = found.id;
+    session.playerId = String(result.playerId || "");
     session.prevPlayerId = "";
-    rememberPlayerForRoom(code, found.id);
+    rememberPlayerForRoom(code, session.playerId);
     persistSession();
 
     if($("playerLoginPass")) $("playerLoginPass").value = "";
 
-    if(!found.password){
-      try{
-        await setPlayer(code, { id: found.id, password: DEFAULT_PLAYER_PASSWORD, passwordUpdatedAt: nowIso() });
-      }catch(e){}
-    }
-
-    if(playerNeedsPasswordSetup(found)){
-      setInfo(`<b>${escapeHtml(found.name || "Jogador")}</b>, este é seu primeiro acesso. Crie sua própria senha para continuar.`);
-    }else if(playerHasRequiredProfile(found)){
-      setInfo(`Acesso liberado para <b>${escapeHtml(found.name || "Jogador")}</b>.`);
+    const displayName = escapeHtml(result.playerName || rawName || "Jogador");
+    const missing = Array.isArray(result.missingFields) ? result.missingFields : [];
+    if(result.requiresPasswordSetup){
+      setInfo(`<b>${displayName}</b>, este é seu primeiro acesso. Crie sua própria senha para continuar.`);
+    }else if(!missing.length){
+      setInfo(`Acesso liberado para <b>${displayName}</b>.`);
     }else{
-      setInfo(`<b>${escapeHtml(found.name || "Jogador")}</b>, complete sua nota pessoal e posição para continuar.`);
+      setInfo(`<b>${displayName}</b>, complete ${escapeHtml(missing.join(" e "))} para continuar.`);
     }
     render();
   }catch(e){
@@ -272,9 +313,12 @@ async function resetPlayerPasswordByAdmin(playerId, playerName){
   const ok = confirm(`Resetar a senha de ${name} para ${DEFAULT_PLAYER_PASSWORD}?`);
   if(!ok) return;
   try{
-    await setPlayer(state.code, { id: playerId, password: DEFAULT_PLAYER_PASSWORD, passwordUpdatedAt: nowIso() });
+    await callBackend("adminResetPlayerPassword", { code: state.code, playerId });
     if(state.players && state.players[playerId]){
-      state.players[playerId] = Object.assign({}, state.players[playerId], { password: DEFAULT_PLAYER_PASSWORD, passwordUpdatedAt: nowIso() });
+      state.players[playerId] = Object.assign({}, state.players[playerId], {
+        passwordNeedsSetup: true,
+        passwordUpdatedAt: nowIso()
+      });
     }
     setInfo(`Senha de ${name} resetada para ${DEFAULT_PLAYER_PASSWORD}.`);
     render();
@@ -1829,6 +1873,7 @@ async function resolveExistingRegistrationForThisDevice(code){
 
     async function loadDeveloperRooms(force = false){
       if(!db || !session.developer) return;
+      await ensureFirebaseClientReady().catch(()=>null);
       try{
         state.developerRoomsError = "";
         const qs = await db.collection("matches").orderBy("updatedAt","desc").limit(200).get();
@@ -1845,7 +1890,7 @@ async function resolveExistingRegistrationForThisDevice(code){
             createdAt: String(d.createdAt || ""),
             activeRoundAtMs: Number(d.activeRoundAtMs || 0),
             matchLocation: String(d.matchLocation || ""),
-            adminPass: String(d.adminPass || ""),
+            adminPass: "",
             ownerName: String(d.ownerName || ""),
             ownerWhatsApp: String(d.ownerWhatsApp || ""),
             commercialStatus: normalizeCommercialStatus(d.commercialStatus || "ativo"),
@@ -2221,8 +2266,10 @@ async function resolveExistingRegistrationForThisDevice(code){
         open: ["inativo","inadimplente","bloqueado"].includes(commercialStatus) ? false : true,
         updatedAt: nowIso()
       };
-      if(adminPass) patch.adminPass = adminPass;
       try{
+        if(adminPass){
+          await callBackend("rotateRoomAdminPassword", { code: safeCode, newPassword: adminPass });
+        }
         await metaUpdate(safeCode, patch);
         await loadDeveloperRooms(false);
         if(normalizeRoomCode(state.code) === safeCode){
@@ -2237,9 +2284,9 @@ async function resolveExistingRegistrationForThisDevice(code){
           state.plan = plan;
           state.clientNotes = clientNotes;
           state.open = !!patch.open;
-          if(adminPass) state.adminPassStored = adminPass;
+          state.adminPassStored = "";
         }
-        setInfo(`Sala ${safeCode} salva com sucesso.`);
+        setInfo(`Sala ${safeCode} salva com sucesso.${adminPass ? " A senha admin foi atualizada no backend." : ""}`);
         render();
       }catch(e){
         setSyncError(e && e.message ? e.message : String(e || "Erro ao salvar dados da sala."));
@@ -2249,12 +2296,15 @@ async function resolveExistingRegistrationForThisDevice(code){
     async function developerCopyAdminAccess(code){
       const safeCode = String(code || "").toUpperCase();
       const room = (state.developerRooms || []).find(r => String(r.code || "").toUpperCase() === safeCode) || {};
-      const adminPass = String(room.adminPass || ADMIN_PASS || "").trim();
+      if(!room.adminPass){
+        alert("Após a migração para Auth/backend, a senha admin não pode mais ser lida no painel. Para compartilhar um novo acesso, defina uma nova senha admin no campo da sala e clique em Salvar.");
+        return;
+      }
       const lines = [
         `Acesso Admin · Manchette Volleyball`,
         `Sala: ${safeCode}`,
         `Link: ${buildRoomUrl(safeCode)}`,
-        `Senha admin: ${adminPass}`
+        `Senha admin: ${room.adminPass}`
       ];
       if(room.roomName) lines.splice(1, 0, `Grupo: ${room.roomName}`);
       await copyToClipboard(lines.join("\n"));
@@ -2528,9 +2578,12 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
     async function createRoom(){
       try{
         if(!canCreateRooms()) return alert("A criação de salas fica disponível para Admin ou Desenvolvedor.");
-        const code = genCode(6);
-        const patch = { adminPass: (ADMIN_PASS || "admin123") };
-        await ensureRoom(code, patch);
+        await ensureFirebaseClientReady();
+        const result = await callBackend("createRoom", {
+          adminPassword: ADMIN_PASS || "admin123"
+        });
+        const code = normalizeRoomCode(result.code || "");
+        if(!code) throw new Error("O backend não retornou o código da sala.");
         state.code = code;
         session.code = code;
         session.playerId = "";
@@ -2550,21 +2603,15 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         if(!ownerName) return;
         const ownerWhatsApp = String(prompt("WhatsApp do responsável:", "") || "").trim();
         const roomName = String(prompt("Nome do grupo / quadra:", `Teste de ${ownerName}`) || `Teste de ${ownerName}`).trim();
-        const code = genCode(6);
-        const generatedAdminPass = genPlayerCode(8);
-        const trialUntil = datePlusDays(7);
-        await ensureRoom(code, {
-          roomName,
-          roomSubtitle: ownerName,
+        await ensureFirebaseClientReady();
+        const result = await callBackend("createFreeTrialRoom", {
           ownerName,
           ownerWhatsApp,
-          adminPass: generatedAdminPass,
-          plan: "free",
-          commercialStatus: "teste",
-          trialEndsAt: trialUntil,
-          clientNotes: "Teste grátis criado pelo fluxo inicial.",
-          open: true
+          roomName
         });
+        const code = normalizeRoomCode(result.code || "");
+        const generatedAdminPass = String(result.adminPassword || "").trim();
+        const trialUntil = String(result.trialEndsAt || "");
         setAccessMode("admin");
         state.code = code;
         session.code = code;
@@ -2578,11 +2625,11 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
           `Sala: ${code}`,
           `Grupo: ${roomName}`,
           `Link: ${buildRoomUrl(code)}`,
-          `Senha admin: ${generatedAdminPass}`,
-          `Teste até: ${fmtDatePt(trialUntil)}`
-        ];
+          generatedAdminPass ? `Senha admin: ${generatedAdminPass}` : "",
+          trialUntil ? `Teste até: ${fmtDatePt(trialUntil)}` : ""
+        ].filter(Boolean);
         try{ await copyToClipboard(lines.join("\n")); }catch{}
-        alert(`Teste grátis criado.\n\nSala: ${code}\nSenha admin: ${generatedAdminPass}\n\nOs dados foram copiados para facilitar o envio ao cliente.`);
+        alert(`Teste grátis criado.\n\nSala: ${code}${generatedAdminPass ? `\nSenha admin: ${generatedAdminPass}` : ""}\n\nOs dados foram copiados para facilitar o envio ao cliente.`);
         setInfo("Teste grátis criado. Use esta mesma sala para fazer upgrade depois para Básico ou PRO.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -2595,6 +2642,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
 
     async function joinRoomByCode(rawCode){
       try{
+        await ensureFirebaseClientReady();
         const code = normalizeRoomCode(rawCode);
         if(!code) return;
         const mode = accessMode();
@@ -2609,10 +2657,10 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         }
         const data = snap.data() || {};
         if(mode === "admin" && !session.developer){
-          const expectedPass = String(data.adminPass || ADMIN_PASS || "").trim();
           const typedPass = String(window.prompt(`Digite a senha admin da sala ${code}:`, "") || "").trim();
           if(!typedPass) return;
-          if(typedPass !== expectedPass) return alert("Senha admin inválida para esta sala.");
+          await callBackend("adminEnterRoom", { code, password: typedPass });
+          await callBackend("migrateRoomSecurity", { code }).catch(()=>{});
         }
         const restriction = roomRestrictionMessage(data, mode);
         if(restriction) return alert(restriction);
@@ -2706,25 +2754,15 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       if(!(baseNote >= MIN_NOTA && baseNote <= MAX_NOTA)) throw new Error("Escolha a nota pessoal do jogador.");
       if(!POSICOES.includes(position)) throw new Error("Escolha a posição do jogador.");
 
-      const duplicate = Object.values(state.players || {}).find(p => playerNameKey(p && p.name) === playerNameKey(name));
-      if(duplicate) throw new Error("Já existe um jogador com este nome nesta sala. Use outro nome ou ajuste o cadastro existente.");
-
-      const id = safeId();
-      const player = {
-        id,
+      const player = await callBackend("adminCreatePlayer", {
+        code,
         name,
-        nameLower: playerNameKey(name),
         baseNote,
-        position,
-        password: DEFAULT_PLAYER_PASSWORD,
-        passwordUpdatedAt: nowIso(),
-        createdAt: nowIso(),
-        createdByAdmin: true
-      };
+        position
+      });
 
-      await setPlayer(code, player);
-      if(state.activeRoundId){
-        await setAttendance(code, state.activeRoundId, id, {
+      if(state.activeRoundId && player && player.id){
+        await setAttendance(code, state.activeRoundId, player.id, {
           present: false,
           team: null,
           checkedInAtMs: null,
@@ -2747,7 +2785,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         openWhatsAppWithText(buildInviteMessage(player.name, String(code).toUpperCase()));
       }
 
-      await appendAuditLog("player_create", { playerId: id, playerName: player.name, viaWhatsApp: !!opts.openWhatsApp, baseNote, position }, code);
+      await appendAuditLog("player_create", { playerId: player.id, playerName: player.name, viaWhatsApp: !!opts.openWhatsApp, baseNote, position }, code);
       return player;
     }
 
@@ -2789,9 +2827,6 @@ async function registerMeSendWhatsApp(){
       const currentPassword = String($("myCurrentPassword")?.value || "").trim();
       const nextPassword = String($("myNewPassword")?.value || "").trim();
       const confirmPassword = String($("myConfirmPassword")?.value || "").trim();
-      const expectedCurrent = playerPasswordOf(m);
-
-      const updates = { id: m.id, name, baseNote, position, updatedAt: nowIso() };
       let passwordChanged = false;
 
       if(needsSetup){
@@ -2799,27 +2834,36 @@ async function registerMeSendWhatsApp(){
         const validation = validatePlayerPassword(nextPassword);
         if(validation) return alert(validation);
         if(nextPassword !== confirmPassword) return alert("A confirmação da nova senha não confere.");
-        updates.password = nextPassword;
-        updates.passwordUpdatedAt = nowIso();
         passwordChanged = true;
       }else{
         const wantsPasswordChange = !!(currentPassword || nextPassword || confirmPassword);
         if(wantsPasswordChange){
-          if(currentPassword !== expectedCurrent) return alert("Senha atual inválida.");
           const validation = validatePlayerPassword(nextPassword);
           if(validation) return alert(validation);
           if(nextPassword !== confirmPassword) return alert("A confirmação da nova senha não confere.");
-          if(nextPassword === expectedCurrent) return alert("Digite uma senha diferente da atual.");
-          updates.password = nextPassword;
-          updates.passwordUpdatedAt = nowIso();
           passwordChanged = true;
         }
       }
 
       try{
-        await setPlayer(code, updates);
+        const result = await callBackend("playerSaveProfile", {
+          code,
+          name,
+          baseNote,
+          position,
+          currentPassword,
+          newPassword: nextPassword
+        });
+        const freshPlayer = Object.assign({}, state.players[m.id] || {}, {
+          name,
+          nameLower: playerNameKey(name),
+          baseNote,
+          position,
+          updatedAt: nowIso(),
+          passwordNeedsSetup: !!result.passwordNeedsSetup
+        });
         if(state.players && state.players[m.id]){
-          state.players[m.id] = Object.assign({}, state.players[m.id], updates);
+          state.players[m.id] = freshPlayer;
         }
         if($("myCurrentPassword")) $("myCurrentPassword").value = "";
         if($("myNewPassword")) $("myNewPassword").value = "";
@@ -2860,40 +2904,13 @@ async function registerMeSendWhatsApp(){
 }
 
 async function saveMyPassword(){
-      const code = state.code;
-      let m = me();
-      if(!code) return;
-      if(!m) m = await ensureMeLoaded();
-      if(!m) return alert("Faça login para alterar sua senha.");
-
-      const needsSetup = playerNeedsPasswordSetup(m);
-      const currentPassword = String($("myCurrentPassword")?.value || "").trim();
-      const nextPassword = String($("myNewPassword")?.value || "").trim();
-      const confirmPassword = String($("myConfirmPassword")?.value || "").trim();
-      const expectedCurrent = playerPasswordOf(m);
-
-      if(!needsSetup && currentPassword !== expectedCurrent) return alert("Senha atual inválida.");
-      const validation = validatePlayerPassword(nextPassword);
-      if(validation) return alert(validation);
-      if(nextPassword !== confirmPassword) return alert("A confirmação da nova senha não confere.");
-      if(!needsSetup && nextPassword === expectedCurrent) return alert("Digite uma senha diferente da atual.");
-
-      try{
-        await setPlayer(code, { id: m.id, password: nextPassword, passwordUpdatedAt: nowIso(), updatedAt: nowIso() });
-        if(state.players && state.players[m.id]){
-          state.players[m.id] = Object.assign({}, state.players[m.id], { password: nextPassword, passwordUpdatedAt: nowIso() });
-        }
-        if($("myCurrentPassword")) $("myCurrentPassword").value = "";
-        if($("myNewPassword")) $("myNewPassword").value = "";
-        if($("myConfirmPassword")) $("myConfirmPassword").value = "";
-        setInfo(needsSetup ? "<b>Senha criada com sucesso.</b> Agora você já pode continuar." : "Senha alterada com sucesso.");
-        render();
-      }catch(e){
-        setSyncError(e && e.message ? e.message : e);
-      }
+      return saveMySettings();
 }
 
-function logoutPlayerSession(){
+async function logoutPlayerSession(){
+  try{
+    if(state.code) await callBackend("logoutRoom", { code: state.code }).catch(()=>{});
+  }catch{}
   forgetPlayerForRoom(state.code);
   session.playerId = "";
   session.prevPlayerId = "";
@@ -3066,12 +3083,21 @@ async function markPresence(present){
       setInfo("Modo Admin ativado. Agora digite o código da sala e entre. A senha será pedida ao entrar.");
     }
 
-    function developerLogin(){
-      const pass = ($("homeDeveloperPass")?.value || "").trim();
-      if(pass !== DEVELOPER_PASS) return alert("Senha de Desenvolvedor inválida.");
-      setAccessMode("developer");
-      if($("homeDeveloperPass")) $("homeDeveloperPass").value = "";
-      setInfo("Modo Desenvolvedor ativado.");
+    async function developerLogin(){
+      try{
+        await ensureFirebaseClientReady();
+        const pass = ($("homeDeveloperPass")?.value || "").trim();
+        if(!pass) return alert("Digite a senha de Desenvolvedor.");
+        await callBackend("developerLogin", { password: pass });
+        if(auth && auth.currentUser) await auth.currentUser.getIdToken(true);
+        await refreshDeveloperModeFromClaims(true);
+        if($("homeDeveloperPass")) $("homeDeveloperPass").value = "";
+        setInfo("Modo Desenvolvedor ativado.");
+        render();
+      }catch(e){
+        const msg = e && e.message ? e.message : String(e || "Erro no acesso de Desenvolvedor.");
+        alert(msg);
+      }
     }
 
     function playerLogin(){
@@ -3079,7 +3105,14 @@ async function markPresence(present){
       setInfo("Modo Jogador ativado.");
     }
 
-    function adminLogout(){
+    async function adminLogout(){
+      try{
+        if(state.code) await callBackend("logoutRoom", { code: state.code }).catch(()=>{});
+        if(session.developer){
+          await callBackend("developerLogout", {}).catch(()=>{});
+          if(auth && auth.currentUser) await auth.currentUser.getIdToken(true).catch(()=>{});
+        }
+      }catch{}
       session.playerId = "";
       session.prevPlayerId = "";
       session.adminPassDraft = "";
@@ -4674,6 +4707,8 @@ window.addEventListener("unhandledrejection", (ev)=>{
       try{
         firebase.initializeApp(firebaseConfig);
         db = firebase.firestore();
+        auth = firebase.auth();
+        fns = firebase.app().functions("us-central1");
       }catch(e){
         $("app").innerHTML = `
           <div class="bg-white rounded-2xl shadow p-4 sm:p-6 text-red-700">
@@ -4686,16 +4721,45 @@ window.addEventListener("unhandledrejection", (ev)=>{
       }
 
       render();
-      if(session.developer) loadDeveloperRooms(true);
 
-      const roomFromQuery = roomCodeFromUrl();
-      if(roomFromQuery){
-        joinRoomByCode(roomFromQuery);
-      }else{
-        const rememberedRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, ""));
-        if(rememberedRoom && (((accessMode() === "player" || accessMode() === "admin") && !!session.playerId) || accessMode() === "developer")){
-          joinRoomByCode(rememberedRoom);
+      auth.onAuthStateChanged(async (user)=>{
+        currentFirebaseUser = user || null;
+        if(!user){
+          try{
+            await auth.signInAnonymously();
+            return;
+          }catch(e){
+            setSyncError("Falha ao autenticar no Firebase Auth: " + (e && e.message ? e.message : e));
+            markAuthReady();
+            return;
+          }
         }
+        try{
+          await refreshDeveloperModeFromClaims(false);
+        }catch{}
+        markAuthReady();
+        render();
+        if(session.developer) loadDeveloperRooms(true);
+
+        const roomFromQuery = roomCodeFromUrl();
+        if(roomFromQuery){
+          joinRoomByCode(roomFromQuery);
+        }else{
+          const rememberedRoom = normalizeRoomCode(session.code || load(LS_LAST_CODE, ""));
+          if(rememberedRoom && (((accessMode() === "player" || accessMode() === "admin") && !!session.playerId) || accessMode() === "developer")){
+            joinRoomByCode(rememberedRoom);
+          }
+        }
+      });
+
+      if(!auth.currentUser){
+        auth.signInAnonymously().catch((e)=>{
+          setSyncError("Falha ao iniciar Auth anônimo: " + (e && e.message ? e.message : e));
+          markAuthReady();
+        });
+      }else{
+        currentFirebaseUser = auth.currentUser;
+        refreshDeveloperModeFromClaims(false).finally(()=>markAuthReady());
       }
 
       if ("serviceWorker" in navigator) {
