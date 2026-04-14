@@ -1,0 +1,45 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ATENÇÃO:
+    // Este arquivo é um ponto de partida conservador para reduzir exposição acidental.
+    // Como o app atual ainda depende de lógica de cliente para alguns papéis,
+    // a segurança total exige evolução futura para Firebase Auth + backend/claims.
+
+    match /matches/{code} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if false;
+
+      match /players/{playerId} {
+        allow read: if true;
+        allow create, update: if true;
+        allow delete: if true;
+      }
+
+      match /ratings/{ratingId} {
+        allow read: if true;
+        allow create, update, delete: if true;
+      }
+
+      match /snapshots/{snapshotId} {
+        allow read: if true;
+        allow create, update, delete: if true;
+      }
+
+      match /audit/{auditId} {
+        allow read, create: if true;
+        allow update, delete: if false;
+      }
+
+      match /rounds/{roundId} {
+        allow read, create, update: if true;
+        allow delete: if true;
+
+        match /attendance/{playerId} {
+          allow read, create, update, delete: if true;
+        }
+      }
+    }
+  }
+}
