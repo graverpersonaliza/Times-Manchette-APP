@@ -51,6 +51,10 @@
       bloqueado: "Bloqueado"
     };
 
+    const APP_VERSION = "1.0.0";
+    const APP_BUILD = "2026-04-08";
+    const APP_NAME = "Manchette Volleyball";
+
     // ===============================
     // Estado
     // ===============================
@@ -294,6 +298,40 @@ async function copyText(text){
     catch{ alert("Não consegui copiar automaticamente."); }
     document.body.removeChild(ta);
   }
+}
+
+
+function downloadBlob(filename, content, mime="text/plain;charset=utf-8"){
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1500);
+}
+
+function auditCol(code){ return matchDoc(code).collection("audit"); }
+
+async function appendAuditLog(action, details = {}, code = state.code){
+  try{
+    const c = normalizeRoomCode(code);
+    if(!c || !db) return;
+    const who = session.developer ? "developer" : session.admin ? "admin" : session.playerId ? "player" : "anon";
+    await auditCol(c).add({
+      action: String(action || "acao"),
+      details: details || {},
+      actorRole: who,
+      actorPlayerId: String(session.playerId || ""),
+      actorSessionCode: String(session.code || c),
+      at: nowIso(),
+      atMs: nowMs(),
+      appVersion: APP_VERSION,
+      appBuild: APP_BUILD
+    });
+  }catch{}
 }
 
     function safeId(){
@@ -1125,6 +1163,7 @@ async function saveMatchSchedule(){
   state.matchTime = matchTime;
   state.matchLocation = matchLocation;
   state.closeBeforeMin = closeBeforeMin;
+  await appendAuditLog("schedule_save", { matchDate, matchTime, matchLocation, closeBeforeMin });
   setInfo("Horário da partida salvo.");
   maybeAutoCloseSchedule();
   render();
@@ -1139,6 +1178,7 @@ async function clearMatchSchedule(){
   state.matchTime = "";
   state.matchLocation = "";
   state.closeBeforeMin = 15;
+  await appendAuditLog("schedule_clear", {});
   setInfo("Horário da partida limpo.");
   render();
 }
@@ -1476,6 +1516,171 @@ async function resolveExistingRegistrationForThisDevice(code){
       if(diff>=1.60) return { ok:false, text:`⚠️ Desequilíbrio alto (diferença ~${diff.toFixed(2)})` };
       if(diff>=1.00) return { ok:true,  text:`Atenção: pode desequilibrar (~${diff.toFixed(2)})` };
       return { ok:true, text:`✓ Times equilibrados (~${diff.toFixed(2)})` };
+    }
+
+
+    function quickStartText(){
+      return [
+        `${APP_NAME} · versão ${APP_VERSION} (${APP_BUILD})`,
+        ``,
+        `PASSO A PASSO RÁPIDO`,
+        `1) Escolha o modo de acesso: Jogador, Admin ou Desenvolvedor.`,
+        `2) Entre pelo código da sala ou crie uma nova sala se estiver como Admin/Desenvolvedor.`,
+        `3) O Admin adiciona os jogadores com senha padrão ${DEFAULT_PLAYER_PASSWORD}.`,
+        `4) No primeiro acesso, o jogador cria a própria senha.`,
+        `5) O jogador completa nota pessoal e posição, confirma presença e escolhe o time.`,
+        `6) O Admin pode sortear times, salvar histórico, exportar listas e fazer backup da sala.`,
+        `7) O Desenvolvedor gerencia planos, status comercial, salas e suporte.`
+      ].join("\n");
+    }
+
+    async function buildRoomBackupObject(code = state.code){
+      const c = normalizeRoomCode(code);
+      if(!c) throw new Error("Entre em uma sala antes de gerar o backup.");
+      const [metaSnap, playersSnap, ratingsSnap, snapshotsSnap, roundsSnap] = await Promise.all([
+        matchDoc(c).get(),
+        playersCol(c).get(),
+        ratingsCol(c).get(),
+        snapshotsCol(c).get(),
+        roundsCol(c).limit(100).get()
+      ]);
+      const rounds = [];
+      for(const rd of roundsSnap.docs){
+        const att = await attendanceCol(c, rd.id).get();
+        rounds.push({
+          id: rd.id,
+          data: rd.data() || {},
+          attendance: att.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+        });
+      }
+      return {
+        exportVersion: 1,
+        appName: APP_NAME,
+        appVersion: APP_VERSION,
+        appBuild: APP_BUILD,
+        exportedAt: nowIso(),
+        roomCode: c,
+        room: { meta: metaSnap.exists ? (metaSnap.data() || {}) : {} },
+        players: playersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+        ratings: ratingsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+        snapshots: snapshotsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+        rounds
+      };
+    }
+
+    async function downloadRoomBackup(){
+      if(!session.admin && !session.developer) return alert("Somente Admin ou Desenvolvedor podem baixar o backup.");
+      try{
+        const backup = await buildRoomBackupObject(state.code);
+        const filename = `backup-${normalizeRoomCode(state.code || 'sala')}-${new Date().toISOString().slice(0,10)}.json`;
+        downloadBlob(filename, JSON.stringify(backup, null, 2), "application/json;charset=utf-8");
+        await appendAuditLog("backup_download", { roomCode: normalizeRoomCode(state.code) });
+        setInfo("Backup JSON baixado.");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao gerar backup."));
+      }
+    }
+
+    async function importRoomBackupObject(payload){
+      if(!session.admin && !session.developer) return alert("Somente Admin ou Desenvolvedor podem restaurar backup.");
+      const c = normalizeRoomCode(state.code);
+      if(!c) return alert("Entre na sala que vai receber a restauração.");
+      if(!payload || typeof payload !== 'object') return alert("Backup inválido.");
+      const sourceCode = normalizeRoomCode(payload.roomCode || payload?.room?.meta?.code || "");
+      const ok = confirm(`Restaurar backup${sourceCode ? ` da sala ${sourceCode}` : ''} na sala atual ${c}? Esta ação substitui jogadores, avaliações, rodadas e histórico atuais.`);
+      if(!ok) return;
+      try{
+        await resetRoom(c);
+        const meta = Object.assign({}, (payload.room && payload.room.meta) || {});
+        delete meta.code;
+        await matchDoc(c).set(Object.assign({ code:c, updatedAt: nowIso() }, meta), { merge:true });
+        for(const player of Array.isArray(payload.players) ? payload.players : []){
+          if(player && player.id) await playersCol(c).doc(String(player.id)).set(player, { merge:true });
+        }
+        for(const rating of Array.isArray(payload.ratings) ? payload.ratings : []){
+          if(rating && rating.id) await ratingsCol(c).doc(String(rating.id)).set(rating, { merge:true });
+        }
+        for(const snap of Array.isArray(payload.snapshots) ? payload.snapshots : []){
+          if(snap && snap.id) await snapshotsCol(c).doc(String(snap.id)).set(snap, { merge:true });
+        }
+        const rounds = Array.isArray(payload.rounds) ? payload.rounds : [];
+        for(const round of rounds){
+          if(!round || !round.id) continue;
+          await roundsCol(c).doc(String(round.id)).set(round.data || { id: round.id }, { merge:true });
+          for(const att of Array.isArray(round.attendance) ? round.attendance : []){
+            if(att && att.id) await attendanceCol(c, String(round.id)).doc(String(att.id)).set(att, { merge:true });
+          }
+        }
+        await appendAuditLog("backup_restore", { roomCode: c, sourceCode: sourceCode || c, playersCount: Array.isArray(payload.players) ? payload.players.length : 0 });
+        setInfo("Backup restaurado com sucesso. Reabra a sala se algum dado não aparecer de imediato.");
+        attachRoom(c);
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao restaurar backup."));
+      }
+    }
+
+    function importRoomBackup(){
+      if(!session.admin && !session.developer) return alert("Somente Admin ou Desenvolvedor podem restaurar backup.");
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.onchange = async () => {
+        const file = input.files && input.files[0];
+        if(!file) return;
+        try{
+          const raw = await file.text();
+          const payload = JSON.parse(raw);
+          await importRoomBackupObject(payload);
+        }catch(e){
+          setSyncError(e && e.message ? e.message : String(e || 'Erro ao ler o backup.'));
+        }
+      };
+      input.click();
+    }
+
+    async function downloadAuditLog(){
+      if(!session.admin && !session.developer) return alert("Somente Admin ou Desenvolvedor podem baixar o log.");
+      try{
+        const c = normalizeRoomCode(state.code);
+        const qs = await auditCol(c).orderBy('atMs','desc').limit(500).get();
+        const lines = [
+          `${APP_NAME} · Log de auditoria`,
+          `Sala: ${c}`,
+          `Gerado em: ${nowIso()}`,
+          ``
+        ];
+        qs.docs.forEach((doc, idx) => {
+          const d = doc.data() || {};
+          lines.push(`${idx+1}. ${String(d.at || '')} · ${String(d.actorRole || 'anon')} · ${String(d.action || 'acao')}`);
+          if(d.details) lines.push(`   ${JSON.stringify(d.details)}`);
+        });
+                downloadBlob(`auditoria-${c}-${new Date().toISOString().slice(0,10)}.txt`, lines.join("\n"));
+        setInfo("Log de auditoria baixado.");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : String(e || "Erro ao baixar auditoria."));
+      }
+    }
+
+    function appSupportCardHtml(){
+      return `
+        <div class="mt-5 rounded-2xl border bg-white p-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 class="font-bold text-gray-800">Central rápida</h3>
+              <p class="text-xs text-gray-500">Versão ${APP_VERSION} · build ${APP_BUILD}. Guia rápido, boas práticas e documentação para publicação.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button id="btnQuickHelp" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Como usar</button>
+              <button id="btnCopyQuickHelp" class="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm font-semibold">Copiar guia</button>
+            </div>
+          </div>
+          <div class="mt-3 grid gap-3 md:grid-cols-3 text-sm">
+            <div class="rounded-xl border bg-gray-50 p-3"><div class="font-semibold text-gray-800">Fase 1</div><div class="mt-1 text-xs text-gray-600">Segurança operacional, versionamento, backup e regras do Firebase.</div></div>
+            <div class="rounded-xl border bg-gray-50 p-3"><div class="font-semibold text-gray-800">Fase 2</div><div class="mt-1 text-xs text-gray-600">Operação da partida, cadastro, presença, times, histórico e exportações.</div></div>
+            <div class="rounded-xl border bg-gray-50 p-3"><div class="font-semibold text-gray-800">Fase 3 e 4</div><div class="mt-1 text-xs text-gray-600">Planos, painel do desenvolvedor, relatórios, ajuda, documentação e escala.</div></div>
+          </div>
+        </div>
+      `;
     }
 
     // ===============================
@@ -1929,6 +2134,7 @@ async function resolveExistingRegistrationForThisDevice(code){
         removeSavedGroup(c);
         if(normalizeRoomCode(state.code) === c) leaveRoom();
         await loadDeveloperRooms(false);
+        await appendAuditLog("developer_delete_room", { roomCode: c }, c);
         setInfo(`Sala ${c} removida.`);
         render();
       }catch(e){
@@ -2333,6 +2539,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         attachRoom(code);
         rememberCurrentGroup(true);
         if(session.developer) loadDeveloperRooms(false);
+        await appendAuditLog("room_create", { roomCode: code, source: session.developer ? "developer" : "admin" }, code);
         setInfo("Sala criada. Compartilhe o código ou o link da sala para os outros entrarem.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -2540,6 +2747,7 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         openWhatsAppWithText(buildInviteMessage(player.name, String(code).toUpperCase()));
       }
 
+      await appendAuditLog("player_create", { playerId: id, playerName: player.name, viaWhatsApp: !!opts.openWhatsApp, baseNote, position }, code);
       return player;
     }
 
@@ -2616,6 +2824,7 @@ async function registerMeSendWhatsApp(){
         if($("myCurrentPassword")) $("myCurrentPassword").value = "";
         if($("myNewPassword")) $("myNewPassword").value = "";
         if($("myConfirmPassword")) $("myConfirmPassword").value = "";
+        await appendAuditLog("player_update_profile", { playerId: m.id, name, baseNote, position, passwordChanged: !!passwordChanged });
         if(passwordChanged && needsSetup){
           setInfo("<b>Alterações salvas.</b> Sua senha foi criada com sucesso.");
         }else if(passwordChanged){
@@ -2881,6 +3090,7 @@ async function markPresence(present){
     async function toggleOpen(){
       if(!session.admin) return alert("Somente admin.");
       await metaUpdate(state.code, { open: !state.open });
+      await appendAuditLog("room_toggle_open", { open: !state.open });
     }
 
     async function newRound(){
@@ -2894,6 +3104,7 @@ async function markPresence(present){
         const at = nowMs();
         await roundDoc(code, rid).set({ id: rid, createdAt: nowIso(), createdAtMs: at }, { merge:true });
         await matchDoc(code).set({ activeRoundId: rid, activeRoundAtMs: at, updatedAt: nowIso() }, { merge:true });
+        await appendAuditLog("round_new", { roundId: rid, atMs: at }, code);
         setInfo("Nova rodada iniciada. Agora cada jogador confirma presença.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -3030,6 +3241,7 @@ async function randomizeTeams(){
       session.playerId = "";
       persistSession();
       await resetRoom(state.code);
+      await appendAuditLog("room_reset", { roomCode: state.code });
       setInfo("Sala resetada (tudo zerado).");
     }
 
@@ -3529,6 +3741,7 @@ async function randomizeTeams(){
           `}
           ${!featureAllowed('multiGroups') ? `<div class="mt-3">${premiumLockCard('Grupos', 'No plano Free você salva 1 grupo. No Básico você libera até 3 e no PRO grupos praticamente ilimitados.', 'grupos')}</div>` : ``}
         </div>
+        ${appSupportCardHtml()}
         ${renderDeveloperRoomsPanel()}
       `;
     }
@@ -3838,8 +4051,11 @@ async function randomizeTeams(){
                       <button id="btnWATeams" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>WhatsApp</button>
                       <button id="btnDownloadPng" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Baixar lista</button>
                       <button id="btnSaveTeams" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Salvar no histórico</button>
+                      <button id="btnDownloadBackup" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Backup JSON</button>
+                      <button id="btnImportBackup" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Restaurar backup</button>
+                      <button id="btnDownloadAudit" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Baixar log</button>
                     </div>
-                    <div class="mt-2 text-xs text-gray-500">Somente admin. Copie/manda no WhatsApp (texto) ou baixar lista.</div>
+                    <div class="mt-2 text-xs text-gray-500">Somente admin. Copie, exporte ou restaure a sala com backup JSON. O log registra ações críticas.</div>
 
                     <div class="mt-4">
                       <div class="flex items-center justify-between">
@@ -4161,6 +4377,9 @@ async function randomizeTeams(){
         if($("btnWATeams")) $("btnWATeams").onclick = ()=> whatsCurrentTeams();
         if($("btnDownloadPng")) $("btnDownloadPng").onclick = ()=> downloadTeamsPng();
         if($("btnSaveTeams")) $("btnSaveTeams").onclick = ()=> saveTeamsSnapshot();
+        if($("btnDownloadBackup")) $("btnDownloadBackup").onclick = ()=> downloadRoomBackup();
+        if($("btnImportBackup")) $("btnImportBackup").onclick = ()=> importRoomBackup();
+        if($("btnDownloadAudit")) $("btnDownloadAudit").onclick = ()=> downloadAuditLog();
 
         document.querySelectorAll("[data-snapcopy]").forEach(btn=>{
           btn.addEventListener("click", ()=>{
@@ -4206,6 +4425,8 @@ async function randomizeTeams(){
         if($("btnSavePersonalization")) $("btnSavePersonalization").onclick = ()=> savePersonalization();
         if($("btnDevCloseAllOpen")) $("btnDevCloseAllOpen").onclick = ()=> developerCloseAllOpenRooms();
         if($("btnCopyRoomLink")) $("btnCopyRoomLink").onclick = ()=> copyToClipboard(buildRoomUrl(code));
+        if($("btnQuickHelp")) $("btnQuickHelp").onclick = ()=> alert(quickStartText());
+        if($("btnCopyQuickHelp")) $("btnCopyQuickHelp").onclick = ()=> copyToClipboard(quickStartText());
 
         document.querySelectorAll("[data-open-group]").forEach(btn=>{
           btn.addEventListener("click", ()=>{
@@ -4385,6 +4606,8 @@ async function randomizeTeams(){
     if($("btnAccessDeveloper")) $("btnAccessDeveloper").onclick = ()=> developerLogin();
     if($("btnAccessLogout")) $("btnAccessLogout").onclick = ()=> adminLogout();
     if($("btnNotifToggle")) $("btnNotifToggle").onclick = ()=> notificationsEnabled() ? disableSystemNotifications() : enableSystemNotifications();
+    if($("btnQuickHelp")) $("btnQuickHelp").onclick = ()=> alert(quickStartText());
+    if($("btnCopyQuickHelp")) $("btnCopyQuickHelp").onclick = ()=> copyToClipboard(quickStartText());
     $("btnJoin").onclick = ()=> joinRoom();
     if($("btnPasteJoin")) $("btnPasteJoin").onclick = ()=> pasteRoomCodeAndJoin();
     $("btnCreate").onclick = ()=> createRoom();
