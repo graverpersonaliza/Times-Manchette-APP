@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
   <title>Manchette Volleyball</title>
-  <!-- build: dev-upgrade-commercial-2026-03-11 -->
+  <!-- build: release-1.0.0-2026-04-08 -->
+  <meta name="description" content="Manchette Volleyball: inscrições, presença, times, histórico, ranking, relatórios e painel administrativo em PWA." />
 
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -73,20 +74,7 @@
   </div>
   <script src="script_0.js"></script>
 
-  <!--
-  FIRESTORE RULES (MVP para TESTE)
-  rules_version = '2';
-  service cloud.firestore {
-    match /databases/{database}/documents {
-      match /matches/{code} {
-        allow read, write: if true;
-        match /{document=**} {
-          allow read, write: if true;
-        }
-      }
-    }
-  }
-  -->
+
 
 <script src="script_1.js"></script>
 </body>
