@@ -51,8 +51,8 @@
       bloqueado: "Bloqueado"
     };
 
-    const APP_VERSION = "1.1.0";
-    const APP_BUILD = "2026-04-14-auth-backend";
+    const APP_VERSION = "1.2.0";
+    const APP_BUILD = "2026-04-15-next-level-1";
     const APP_NAME = "Manchette Volleyball";
 
     // ===============================
@@ -110,6 +110,13 @@
     let unsub = { meta:null, players:null, attendance:null, ratings:null, snapshots:null };
     let liveNotify = { roomCode:"", playersReady:false, attendanceReady:false, players:{}, attendance:{}, lastKey:"", lastAt:0 };
 
+    let uiBusy = { key:"", text:"" };
+    let uiPlayerLoginError = "";
+    let uiPlayerLoginAttempted = false;
+    let uiAdminPlayerSearch = "";
+    let uiAdminPlayerStatus = "ativos";
+
+
     // ===============================
     // Helpers
     // ===============================
@@ -146,7 +153,10 @@ function normalizePlayerName(value){
 }
 
 function playerNameKey(value){
-  return normalizePlayerName(value).toLocaleLowerCase("pt-BR");
+  return normalizePlayerName(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR");
 }
 
 function playerPasswordOf(player){
@@ -205,6 +215,69 @@ async function callBackend(name, payload = {}){
   const callable = fns.httpsCallable(name);
   const result = await callable(payload || {});
   return result && result.data ? result.data : {};
+}
+
+function setBusy(key, text){
+  uiBusy = key ? { key:String(key), text:String(text || "Processando...") } : { key:"", text:"" };
+  render();
+}
+
+function clearBusy(key){
+  if(!key || uiBusy.key === key){
+    uiBusy = { key:"", text:"" };
+    render();
+  }
+}
+
+function isBusy(keyPrefix = ""){
+  return !!uiBusy.key && (!keyPrefix || uiBusy.key === keyPrefix || uiBusy.key.startsWith(keyPrefix));
+}
+
+function spinnerHtml(mode = "light"){
+  const border = mode === "dark" ? "border-slate-400 border-t-slate-900" : "border-white/60 border-t-white";
+  return `<span class="inline-block h-4 w-4 rounded-full border-2 ${border} animate-spin"></span>`;
+}
+
+function busyLabel(defaultLabel, waitingLabel, busyKey){
+  if(!isBusy(busyKey)) return defaultLabel;
+  return `<span class="inline-flex items-center gap-2">${spinnerHtml()}<span>${escapeHtml(waitingLabel || "Processando...")}</span></span>`;
+}
+
+function busyBannerHtml(){
+  if(!uiBusy.text) return "";
+  return `
+    <div class="mt-4 p-3 rounded-xl bg-slate-900 text-white text-sm flex items-center gap-3 shadow-sm">
+      ${spinnerHtml()}
+      <div><b>Processando:</b> ${escapeHtml(uiBusy.text)}</div>
+    </div>
+  `;
+}
+
+function clearPlayerLoginError(){
+  if(!uiPlayerLoginError) return;
+  uiPlayerLoginError = "";
+  render();
+}
+
+function setPlayerLoginError(msg){
+  uiPlayerLoginError = msg ? String(msg) : "";
+  render();
+}
+
+function normalizePlayerStatusFilter(value){
+  return ["ativos","inativos","todos"].includes(String(value || "")) ? String(value) : "ativos";
+}
+
+function adminFilteredPlayers(playersArr){
+  const q = playerNameKey(uiAdminPlayerSearch || "");
+  const status = normalizePlayerStatusFilter(uiAdminPlayerStatus);
+  return (playersArr || []).filter((p)=>{
+    const inactive = !!(p && p.inactive);
+    if(status === "ativos" && inactive) return false;
+    if(status === "inativos" && !inactive) return false;
+    if(q && !playerNameKey((p && p.name) || "").includes(q)) return false;
+    return true;
+  }).sort((a,b)=> playerNameKey((a && a.name) || "").localeCompare(playerNameKey((b && b.name) || ""), "pt-BR"));
 }
 
 function ensurePlayerPasswordReady(player){
@@ -268,6 +341,7 @@ function buildInviteMessage(nome, sala){
 }
 
 async function loginPlayerByNamePassword(){
+  const busyKey = "playerLogin";
   try{
     const code = state.code;
     if(!code) return alert("Entre na sala primeiro (código da partida).");
@@ -278,6 +352,10 @@ async function loginPlayerByNamePassword(){
 
     if(!rawName) return alert("Digite seu nome.");
     if(!rawPassword) return alert("Digite sua senha.");
+
+    uiPlayerLoginAttempted = true;
+    uiPlayerLoginError = "";
+    setBusy(busyKey, "Validando nome e senha do jogador...");
 
     const result = await callBackend("playerLogin", {
       code,
@@ -294,6 +372,8 @@ async function loginPlayerByNamePassword(){
 
     const displayName = escapeHtml(result.playerName || rawName || "Jogador");
     const missing = Array.isArray(result.missingFields) ? result.missingFields : [];
+    uiPlayerLoginAttempted = false;
+    uiPlayerLoginError = "";
     if(result.requiresPasswordSetup){
       setInfo(`<b>${displayName}</b>, este é seu primeiro acesso. Crie sua própria senha para continuar.`);
     }else if(!missing.length){
@@ -303,7 +383,20 @@ async function loginPlayerByNamePassword(){
     }
     render();
   }catch(e){
-    setSyncError(e && e.message ? e.message : e);
+    const msg = e && e.message ? e.message : String(e || "Falha no login do jogador.");
+    if(/Jogador não encontrado nesta sala/i.test(msg)){
+      uiPlayerLoginError = "Jogador não encontrado nesta sala. Confirme se o Admin cadastrou seu nome exatamente igual.";
+      state.syncError = "";
+      render();
+    }else if(/senha/i.test(msg)){
+      uiPlayerLoginError = msg;
+      state.syncError = "";
+      render();
+    }else{
+      setSyncError(msg);
+    }
+  }finally{
+    clearBusy(busyKey);
   }
 }
 
@@ -947,7 +1040,19 @@ function safeBoldInfo(s){
     }
 
     function setInfo(msg){ state.info = msg ? String(msg) : ""; render(); }
-    function setSyncError(msg){ state.syncError = msg ? String(msg) : ""; render(); }
+    function setSyncError(msg){
+      const text = msg ? String(msg) : "";
+      if(text && /Jogador não encontrado nesta sala/i.test(text)){
+        state.syncError = "";
+        if(uiPlayerLoginAttempted){
+          uiPlayerLoginError = "Jogador não encontrado nesta sala. Confirme se o Admin cadastrou seu nome exatamente igual.";
+        }
+        render();
+        return;
+      }
+      state.syncError = text;
+      render();
+    }
     function fmtBR(msOrIso){
       try{
         const d = typeof msOrIso === "number" ? new Date(msOrIso) : new Date(msOrIso || Date.now());
@@ -2680,6 +2785,9 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
         syncRoomUrl(code);
         attachRoom(code);
         rememberCurrentGroup(true);
+        uiPlayerLoginAttempted = false;
+        uiPlayerLoginError = "";
+        state.syncError = "";
         const entryMsg = mode === "developer"
           ? "<b>Entrou na sala como Desenvolvedor.</b> Você tem visão e controle avançado desta sala."
           : mode === "admin"
@@ -2735,6 +2843,9 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
       state.activeInternalGroupId = "";
       state.activeInternalGroupName = "";
       resetLiveNotify("");
+      uiPlayerLoginAttempted = false;
+      uiPlayerLoginError = "";
+      uiBusy = { key:"", text:"" };
       render();
     }
 
@@ -2790,20 +2901,27 @@ Edite qualquer sala livremente por aqui. Use a limpeza de salas inativas ou órf
     }
 
     async function registerMe(){
+      const busyKey = "adminCreatePlayer";
       try{
+        setBusy(busyKey, "Adicionando jogador na sala...");
         const player = await createPlayerByAdmin({ openWhatsApp:false });
         setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado com senha padrão ${DEFAULT_PLAYER_PASSWORD}. No primeiro acesso ele cria a própria senha.`);
         render();
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
+      finally{ clearBusy(busyKey); }
     }
 
 async function registerMeSendWhatsApp(){
+  const busyKey = "adminCreatePlayerWhats";
   try{
+    setBusy(busyKey, "Adicionando jogador e preparando mensagem...");
     const player = await createPlayerByAdmin({ openWhatsApp:true });
     setInfo(`Jogador <b>${escapeHtml(player.name)}</b> adicionado. O WhatsApp foi aberto com a senha padrão ${DEFAULT_PLAYER_PASSWORD}. No primeiro acesso ele cria a própria senha.`);
     render();
   }catch(e){
     setSyncError(e && e.message ? e.message : e);
+  }finally{
+    clearBusy(busyKey);
   }
 }
 
@@ -2845,7 +2963,9 @@ async function registerMeSendWhatsApp(){
         }
       }
 
+      const busyKey = "saveMySettings";
       try{
+        setBusy(busyKey, "Salvando dados do jogador...");
         const result = await callBackend("playerSaveProfile", {
           code,
           name,
@@ -2879,6 +2999,8 @@ async function registerMeSendWhatsApp(){
         render();
       }catch(e){
         setSyncError(e && e.message ? e.message : e);
+      }finally{
+        clearBusy(busyKey);
       }
 }
 
@@ -2901,6 +3023,105 @@ async function registerMeSendWhatsApp(){
       }catch(e){
         setSyncError(e && e.message ? e.message : e);
       }
+}
+
+async function adminEditPlayer(playerId){
+  const code = state.code;
+  const player = state.players && state.players[playerId];
+  if(!code || !player) return;
+  if(!session.admin) return alert("Somente Admin.");
+
+  const currentName = normalizePlayerName(player.name || "");
+  const currentPosition = String(player.position || "").trim();
+  const currentNote = Number(player.baseNote || 0);
+
+  const nextNameRaw = window.prompt("Nome do jogador:", currentName);
+  if(nextNameRaw === null) return;
+  const name = normalizePlayerName(nextNameRaw);
+  if(!name || name.length < 2) return alert("Informe um nome válido (mín. 2 letras).");
+
+  const nextNoteRaw = window.prompt("Nota pessoal (5 a 10):", String(currentNote || ""));
+  if(nextNoteRaw === null) return;
+  const baseNote = Number(String(nextNoteRaw).replace(",", "."));
+  if(!(baseNote >= MIN_NOTA && baseNote <= MAX_NOTA)) return alert("Informe uma nota entre 5 e 10.");
+
+  const nextPositionRaw = window.prompt(`Posição (${POSICOES.join(", ")}):`, currentPosition || POSICOES[0]);
+  if(nextPositionRaw === null) return;
+  const normalizedPosition = POSICOES.find((pos)=> playerNameKey(pos) === playerNameKey(nextPositionRaw));
+  if(!normalizedPosition) return alert(`Posição inválida. Use uma destas: ${POSICOES.join(", ")}`);
+
+  const busyKey = `adminEditPlayer:${playerId}`;
+  try{
+    setBusy(busyKey, `Atualizando cadastro de ${name}...`);
+    await setPlayer(code, {
+      id: playerId,
+      name,
+      baseNote,
+      position: normalizedPosition,
+      inactive: !!player.inactive,
+      updatedAt: nowIso()
+    });
+    await appendAuditLog("player_admin_edit", { playerId, name, baseNote, position: normalizedPosition }, code);
+    setInfo(`Cadastro de <b>${escapeHtml(name)}</b> atualizado.`);
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }finally{
+    clearBusy(busyKey);
+  }
+}
+
+async function adminTogglePlayerActive(playerId){
+  const code = state.code;
+  const player = state.players && state.players[playerId];
+  if(!code || !player) return;
+  if(!session.admin) return alert("Somente Admin.");
+  const nextInactive = !player.inactive;
+  const actionText = nextInactive ? "inativar" : "reativar";
+  if(!confirm(`${nextInactive ? "Inativar" : "Reativar"} ${player.name}?`)) return;
+  const busyKey = `adminTogglePlayer:${playerId}`;
+  try{
+    setBusy(busyKey, `${nextInactive ? "Inativando" : "Reativando"} ${player.name}...`);
+    await setPlayer(code, {
+      id: playerId,
+      inactive: nextInactive,
+      inactiveAt: nextInactive ? nowIso() : null,
+      reactivatedAt: nextInactive ? null : nowIso(),
+      updatedAt: nowIso()
+    });
+    if(nextInactive && state.activeRoundId){
+      await setAttendance(code, state.activeRoundId, playerId, {
+        present: false,
+        team: null,
+        checkedInAtMs: null,
+        updatedAt: nowIso()
+      });
+    }
+    await appendAuditLog("player_admin_toggle_active", { playerId, playerName: player.name, inactive: nextInactive }, code);
+    setInfo(`Jogador <b>${escapeHtml(player.name)}</b> ${nextInactive ? "inativado" : "reativado"} com sucesso.`);
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }finally{
+    clearBusy(busyKey);
+  }
+}
+
+async function adminReindexLegacyPlayers(){
+  const code = state.code;
+  if(!code) return;
+  if(!session.admin) return alert("Somente Admin.");
+  if(!confirm("Corrigir jogadores antigos desta sala agora?")) return;
+  const busyKey = "adminReindexPlayers";
+  try{
+    setBusy(busyKey, "Corrigindo jogadores antigos da sala...");
+    const result = await callBackend("reindexRoomPlayers", { code });
+    const total = Number(result && result.updatedCount || 0);
+    await appendAuditLog("room_reindex_players", { roomCode: code, updatedCount: total }, code);
+    setInfo(total ? `${total} jogador(es) antigos foram corrigidos nesta sala.` : "Nenhum jogador antigo precisou de correção.");
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }finally{
+    clearBusy(busyKey);
+  }
 }
 
 async function saveMyPassword(){
@@ -3357,7 +3578,8 @@ async function randomizeTeams(){
     // Compartilhar (admin) + Histórico + PNG
     // ===============================
     function buildTeamsPayloadFromCurrent(){
-      const playersArr = Object.values(state.players||{});
+      const playersAll = Object.values(state.players||{});
+      const playersArr = playersAll.filter(p => !(p && p.inactive));
       const byTarget = byTargetScores(state.ratings||{});
 
       // ✅ só presentes e com time
@@ -3619,6 +3841,8 @@ async function randomizeTeams(){
         actions.push(`<button data-admin-team="${p.id}" data-team="1" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 text-[11px] font-semibold">${escapeHtml(state.team1Name || "Time 1")}</button>`);
         actions.push(`<button data-admin-team="${p.id}" data-team="2" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-rose-100 text-rose-800 hover:bg-rose-200 text-[11px] font-semibold">${escapeHtml(state.team2Name || "Time 2")}</button>`);
         actions.push(`<button data-admin-team-clear="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 text-[11px] font-semibold">Tirar do time</button>`);
+        actions.push(`<button data-admin-edit-player="${p.id}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Editar</button>`);
+        actions.push(`<button data-admin-toggle-player="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Inativar</button>`);
         actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
@@ -3646,6 +3870,8 @@ async function randomizeTeams(){
       if(isAdmin && !isMe){
         actions.push(`<button data-admin-team="${p.id}" data-team="1" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 text-[11px] font-semibold">${escapeHtml(state.team1Name || "Time 1")}</button>`);
         actions.push(`<button data-admin-team="${p.id}" data-team="2" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-rose-100 text-rose-800 hover:bg-rose-200 text-[11px] font-semibold">${escapeHtml(state.team2Name || "Time 2")}</button>`);
+        actions.push(`<button data-admin-edit-player="${p.id}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Editar</button>`);
+        actions.push(`<button data-admin-toggle-player="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Inativar</button>`);
         actions.push(`<button data-admin-absent="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Marcar ausência</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
@@ -3673,6 +3899,8 @@ async function randomizeTeams(){
       const actions = [];
       if(isAdmin && !isMe){
         actions.push(`<button data-admin-present="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-green-100 text-green-800 hover:bg-green-200 text-[11px] font-semibold">Marcar presença</button>`);
+        actions.push(`<button data-admin-edit-player="${p.id}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px] font-semibold">Editar</button>`);
+        actions.push(`<button data-admin-toggle-player="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 text-[11px] font-semibold">Inativar</button>`);
         actions.push(`<button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">Remover</button>`);
       }
       if(isAdmin){
@@ -3687,6 +3915,69 @@ async function randomizeTeams(){
           <div class="flex flex-wrap items-center gap-2">
             ${you}
             ${actions.join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAdminRosterManager(playersAll, byTarget){
+      if(!session.admin) return "";
+      const filtered = adminFilteredPlayers(playersAll);
+      const activeCount = (playersAll || []).filter(p => !(p && p.inactive)).length;
+      const inactiveCount = (playersAll || []).filter(p => !!(p && p.inactive)).length;
+      return `
+        <div class="bg-white rounded-2xl border p-3 md:col-span-2">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-semibold">Cadastro de jogadores</h2>
+              <p class="text-sm text-gray-500">Busque, edite e organize jogadores ativos ou inativos da sala.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button id="btnAdminReindexPlayers" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm ${isBusy("adminReindexPlayers") ? "opacity-80 cursor-progress" : ""}" ${isBusy("adminReindexPlayers") ? "disabled" : ""}>
+                ${busyLabel("Corrigir jogadores antigos", "Corrigindo...", "adminReindexPlayers")}
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_180px_auto]">
+            <input id="adminPlayerSearch" value="${escapeHtml(uiAdminPlayerSearch)}" placeholder="Buscar jogador por nome" class="px-3 py-2 rounded-lg border" />
+            <select id="adminPlayerStatus" class="px-3 py-2 rounded-lg border">
+              <option value="ativos" ${normalizePlayerStatusFilter(uiAdminPlayerStatus)==='ativos' ? 'selected' : ''}>Ativos</option>
+              <option value="inativos" ${normalizePlayerStatusFilter(uiAdminPlayerStatus)==='inativos' ? 'selected' : ''}>Inativos</option>
+              <option value="todos" ${normalizePlayerStatusFilter(uiAdminPlayerStatus)==='todos' ? 'selected' : ''}>Todos</option>
+            </select>
+            <button id="btnAdminPlayerFilterClear" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">Limpar filtro</button>
+          </div>
+
+          <div class="mt-2 text-xs text-gray-500">
+            Ativos: <b>${activeCount}</b> · Inativos: <b>${inactiveCount}</b> · Mostrando: <b>${filtered.length}</b>
+          </div>
+
+          <div class="mt-3 space-y-2 max-h-[360px] overflow-y-auto pr-1">
+            ${filtered.length ? filtered.map((p)=>{
+              const note = computedNote(p, byTarget).toFixed(1);
+              const inactive = !!p.inactive;
+              return `
+                <div class="rounded-xl border bg-gray-50 p-3">
+                  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <div class="flex flex-wrap items-center gap-2">
+                        <div class="font-semibold text-gray-800">${escapeHtml(p.name)}</div>
+                        <span class="text-[11px] px-2 py-1 rounded-full ${inactive ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}">${inactive ? 'inativo' : 'ativo'}</span>
+                        ${playerNeedsPasswordSetup(p) ? `<span class="text-[11px] px-2 py-1 rounded-full bg-amber-100 text-amber-800">senha pendente</span>` : ``}
+                      </div>
+                      <div class="text-[11px] text-gray-600 mt-1">${escapeHtml(p.position || "Sem posição")} · Nota ${note}${playerProfileBadge(p)}</div>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <button data-admin-edit-player="${p.id}" class="px-3 py-2 rounded-lg border hover:bg-white text-[12px] font-semibold">Editar</button>
+                      <button data-admin-toggle-player="${p.id}" data-name="${escapeHtml(p.name)}" class="px-3 py-2 rounded-lg ${inactive ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-amber-100 text-amber-800 hover:bg-amber-200'} text-[12px] font-semibold">${inactive ? 'Reativar' : 'Inativar'}</button>
+                      <button data-admin-resetpass="${p.id}" data-name="${escapeHtml(p.name)}" class="px-3 py-2 rounded-lg bg-slate-100 text-slate-800 hover:bg-slate-200 text-[12px] font-semibold">Resetar senha</button>
+                      <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-3 py-2 rounded-lg border hover:bg-white text-[12px]">Remover</button>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join("") : `<div class="text-sm text-gray-500">Nenhum jogador encontrado com esse filtro.</div>`}
           </div>
         </div>
       `;
@@ -3784,6 +4075,7 @@ async function randomizeTeams(){
       const canAddPlayer = !!session.admin;
       const profileIncomplete = meObj ? !playerHasRequiredProfile(meObj) : false;
       const passwordPending = meObj ? playerNeedsPasswordSetup(meObj) : false;
+      const playerInactive = meObj ? !!meObj.inactive : false;
 
       if(!meObj){
         return `
@@ -3793,8 +4085,13 @@ async function randomizeTeams(){
             <div class="mt-3 grid gap-2">
               <input id="playerLoginName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
               <input id="playerLoginPass" type="password" placeholder="Sua senha" class="px-3 py-2 rounded-lg border" />
-              <button id="btnPlayerPasswordLogin" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">
-                Entrar no meu jogador
+              ${uiPlayerLoginError ? `
+                <div class="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  ${escapeHtml(uiPlayerLoginError)}
+                </div>
+              ` : ``}
+              <button id="btnPlayerPasswordLogin" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${isBusy("playerLogin") ? "opacity-80 cursor-progress" : ""}" ${isBusy("playerLogin") ? "disabled" : ""}>
+                ${busyLabel("Entrar no meu jogador", "Entrando...", "playerLogin")}
               </button>
             </div>
           </div>
@@ -3820,11 +4117,11 @@ async function randomizeTeams(){
                     ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
                   </select>
                 </div>
-                <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold">
-                  Adicionar jogador
+                <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${isBusy("adminCreatePlayer") ? "opacity-80 cursor-progress" : ""}" ${isBusy("adminCreatePlayer") ? "disabled" : ""}>
+                  ${busyLabel("Adicionar jogador", "Adicionando...", "adminCreatePlayer")}
                 </button>
-                <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold">
-                  📲 Adicionar e enviar acesso
+                <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${isBusy("adminCreatePlayerWhats") ? "opacity-80 cursor-progress" : ""}" ${isBusy("adminCreatePlayerWhats") ? "disabled" : ""}>
+                  ${busyLabel("📲 Adicionar e enviar acesso", "Preparando envio...", "adminCreatePlayerWhats")}
                 </button>
               </div>
             </div>
@@ -3848,6 +4145,12 @@ async function randomizeTeams(){
           ${myTeam ? ` · Time ${myTeam}` : ``}
         </div>
 
+        ${playerInactive ? `
+          <div class="mt-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <b>Cadastro inativo.</b> Peça ao Admin para reativar seu jogador antes de confirmar presença ou escolher time.
+          </div>
+        ` : ``}
+
         ${passwordPending ? `
           <div class="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             <b>Primeiro acesso:</b> crie sua própria senha. Enquanto isso, presença, time e avaliação ficam bloqueados.
@@ -3861,10 +4164,10 @@ async function randomizeTeams(){
         ` : ``}
 
         <div class="mt-2 flex gap-2">
-          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent && !profileIncomplete && !passwordPending) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent && !profileIncomplete && !passwordPending) ? "" : "disabled"}>
+          <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent && !profileIncomplete && !passwordPending && !playerInactive) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent && !profileIncomplete && !passwordPending && !playerInactive) ? "" : "disabled"}>
             Confirmar presença
           </button>
-          <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
+          <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent && !playerInactive) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent && !playerInactive) ? "" : "disabled"}>
             Marcar ausência
           </button>
         </div>
@@ -3876,8 +4179,8 @@ async function randomizeTeams(){
             </div>
 
             <div class="flex flex-wrap gap-2">
-              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
-              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
+              <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending && !playerInactive) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending && !playerInactive) ? "" : "disabled"}>${escapeHtml((state.team1Name||"Time 1"))} (${team1Count}/${TEAM_MAX})</button>
+              <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending && !playerInactive) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null) && !profileIncomplete && !passwordPending && !playerInactive) ? "" : "disabled"}>${escapeHtml((state.team2Name||"Time 2"))} (${team2Count}/${TEAM_MAX})</button>
             </div>
 
             <div class="text-xs text-gray-600">
@@ -3886,7 +4189,7 @@ async function randomizeTeams(){
               <span class="font-semibold">${waiting.length}</span> em espera
             </div>
 
-            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${(profileIncomplete || passwordPending) ? "opacity-50 cursor-not-allowed" : ""}" ${(profileIncomplete || passwordPending) ? "disabled" : ""}>Dar nota / avaliar jogadores</button>
+            <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${(profileIncomplete || passwordPending || playerInactive) ? "opacity-50 cursor-not-allowed" : ""}" ${(profileIncomplete || passwordPending || playerInactive) ? "disabled" : ""}>Dar nota / avaliar jogadores</button>
           </div>
 
           ${bMsg.text ? `
@@ -3928,8 +4231,8 @@ async function randomizeTeams(){
             <input id="myConfirmPassword" type="password" class="px-3 py-2 rounded-lg border" placeholder="Confirmar nova senha" />
           </div>
 
-          <button id="btnSaveMySettings" class="mt-3 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
-            Salvar alterações
+          <button id="btnSaveMySettings" class="mt-3 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${isBusy("saveMySettings") ? "opacity-80 cursor-progress" : ""}" ${isBusy("saveMySettings") ? "disabled" : ""}>
+            ${busyLabel("Salvar alterações", "Salvando...", "saveMySettings")}
           </button>
 
           ${session.admin ? `
@@ -3965,7 +4268,8 @@ async function randomizeTeams(){
       const closeLabel = scheduleMeta.hasClose ? scheduleMeta.closeLabel : "";
       const countdownLabel = scheduleMeta.hasSchedule ? scheduleMeta.countdownLabel : "";
 
-      const playersArr = Object.values(state.players||{});
+      const playersAll = Object.values(state.players||{});
+      const playersArr = playersAll.filter(p => !(p && p.inactive));
       const byTarget = byTargetScores(state.ratings||{});
       const plan = currentPlan();
       const planName = planLabel(plan);
@@ -4055,6 +4359,8 @@ async function randomizeTeams(){
               ${safeBoldInfo(state.info)}
             </div>
           ` : ``}
+
+          ${busyBannerHtml()}
 
           ${commercialAlertHtml}
 
@@ -4257,7 +4563,7 @@ async function randomizeTeams(){
                 <div class="bg-white rounded-2xl border p-3 md:col-span-2">
                   <div class="flex items-center justify-between">
                     <h2 class="text-lg font-semibold">Presentes · Aguardando escolha</h2>
-                    <div class="text-sm text-gray-600">Presentes: ${presentPlayers.length} · Total cadastrados: ${playersArr.length}</div>
+                    <div class="text-sm text-gray-600">Presentes: ${presentPlayers.length} · Total ativos: ${playersArr.length}</div>
                   </div>
                   <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${waiting.length ? waiting.map(p => waitingCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém aguardando.</div>`}
@@ -4273,6 +4579,8 @@ async function randomizeTeams(){
                     ${absent.length ? absent.map(p => absentCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém ausente.</div>`}
                   </div>
                 </div>
+
+                ${session.admin ? renderAdminRosterManager(playersAll, byTarget) : ``}
 
                 <div class="bg-white rounded-2xl border p-4 md:col-span-2">
                   ${plan === "free" ? `
@@ -4627,6 +4935,34 @@ async function randomizeTeams(){
               resetPlayerPasswordByAdmin(pid, nm);
             });
           });
+          document.querySelectorAll("[data-admin-edit-player]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-edit-player");
+              adminEditPlayer(pid);
+            });
+          });
+          document.querySelectorAll("[data-admin-toggle-player]").forEach(btn=>{
+            btn.addEventListener("click", ()=>{
+              const pid = btn.getAttribute("data-admin-toggle-player");
+              adminTogglePlayerActive(pid);
+            });
+          });
+          if($("btnAdminReindexPlayers")) $("btnAdminReindexPlayers").onclick = ()=> adminReindexLegacyPlayers();
+          if($("adminPlayerSearch")){
+            $("adminPlayerSearch").oninput = (e)=>{
+              uiAdminPlayerSearch = String((e && e.target && e.target.value) || "");
+              render();
+            };
+          }
+          if($("adminPlayerStatus")) $("adminPlayerStatus").onchange = (e)=>{
+            uiAdminPlayerStatus = normalizePlayerStatusFilter((e && e.target && e.target.value) || "ativos");
+            render();
+          };
+          if($("btnAdminPlayerFilterClear")) $("btnAdminPlayerFilterClear").onclick = ()=>{
+            uiAdminPlayerSearch = "";
+            uiAdminPlayerStatus = "ativos";
+            render();
+          };
         }
   } else {
     // Prefill do último código (não entra automaticamente)
