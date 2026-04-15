@@ -1,5 +1,5 @@
 /* PWA Service Worker */
-const CACHE_NAME = "manchette-auth-backend-v110";
+const CACHE_NAME = "manchette-next-level1-v120";
 const ASSETS = [
   "./",
   "./index.html",
