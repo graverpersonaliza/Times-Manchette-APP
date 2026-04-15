@@ -30,7 +30,10 @@ function normalizePlayerName(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
 }
 function playerNameKey(value) {
-  return normalizePlayerName(value).toLocaleLowerCase("pt-BR");
+  return normalizePlayerName(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR");
 }
 function assertAuth(request) {
   if (!request.auth || !request.auth.uid) {
@@ -172,8 +175,21 @@ async function assertRoomAdmin(code, request) {
 async function findPlayerByName(code, name) {
   const normalized = normalizePlayerName(name);
   const key = playerNameKey(normalized);
-  const qs = await playersRef(code).where("nameLower", "==", key).limit(3).get();
+  let qs = await playersRef(code).where("nameLower", "==", key).limit(3).get();
+
   if (qs.empty) {
+    // Fallback para jogadores legados sem nameLower migrado
+    const legacyByName = await playersRef(code).where("name", "==", normalized).limit(3).get();
+    if (!legacyByName.empty) return legacyByName.docs[0];
+
+    // Fallback tolerante a acentos/maiúsculas em salas antigas
+    const legacyAll = await playersRef(code).limit(300).get();
+    const matches = legacyAll.docs.filter((doc) => playerNameKey(doc.data()?.name || "") === key);
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      throw new HttpsError("failed-precondition", "Há mais de um jogador com este nome nesta sala. Peça ao Admin para diferenciar os cadastros.");
+    }
+
     throw new HttpsError("not-found", "Jogador não encontrado nesta sala. Peça para o Admin adicionar seu nome.");
   }
   if (qs.size > 1) {
@@ -524,17 +540,56 @@ exports.migrateRoomSecurity = onCall(async (request) => {
   const players = await playersRef(code).get();
   for (const doc of players.docs) {
     const data = doc.data() || {};
-    if (data.passwordHash && data.passwordSalt) continue;
-    const legacy = String(data.password || "").trim() || DEFAULT_PLAYER_PASSWORD;
-    const hashed = hashPassword(legacy);
-    await playersRef(code).doc(doc.id).set({
-      ...hashed,
-      passwordNeedsSetup: playerNeedsSetupFromDoc(data),
-      passwordUpdatedAt: nowIso(),
-      password: FieldValue.delete()
-    }, { merge: true });
-    migratedPlayers += 1;
+    const updates = {
+      updatedAt: nowIso()
+    };
+    let changed = false;
+
+    const expectedNameLower = playerNameKey(data.name || "");
+    if (expectedNameLower && String(data.nameLower || "") !== expectedNameLower) {
+      updates.nameLower = expectedNameLower;
+      changed = true;
+    }
+
+    if (!data.passwordHash || !data.passwordSalt) {
+      const legacy = String(data.password || "").trim() || DEFAULT_PLAYER_PASSWORD;
+      const hashed = hashPassword(legacy);
+      Object.assign(updates, {
+        ...hashed,
+        passwordNeedsSetup: playerNeedsSetupFromDoc(data),
+        passwordUpdatedAt: nowIso(),
+        password: FieldValue.delete()
+      });
+      changed = true;
+    }
+
+    if (changed) {
+      await playersRef(code).doc(doc.id).set(updates, { merge: true });
+      migratedPlayers += 1;
+    }
   }
   await appendAudit(code, "migrate_room_security", { migratedPlayers, migratedRoom }, actor);
   return { ok: true, migratedPlayers, migratedRoom };
+});
+
+
+exports.reindexRoomPlayers = onCall(async (request) => {
+  const code = normalizeRoomCode(request.data?.code);
+  if (!code) throw new HttpsError("invalid-argument", "Código da sala inválido.");
+  const actor = await assertRoomAdmin(code, request);
+  const players = await playersRef(code).get();
+  let reindexed = 0;
+  for (const doc of players.docs) {
+    const data = doc.data() || {};
+    const expectedNameLower = playerNameKey(data.name || "");
+    if (!expectedNameLower) continue;
+    if (String(data.nameLower || "") === expectedNameLower) continue;
+    await playersRef(code).doc(doc.id).set({
+      nameLower: expectedNameLower,
+      updatedAt: nowIso()
+    }, { merge: true });
+    reindexed += 1;
+  }
+  await appendAudit(code, "reindex_room_players", { reindexed }, actor);
+  return { ok: true, reindexed };
 });
