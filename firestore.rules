@@ -1,0 +1,123 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isDeveloper() {
+      return signedIn() && request.auth.token.developer == true;
+    }
+
+    function memberPath(code) {
+      return /databases/$(database)/documents/matches/$(code)/members/$(request.auth.uid);
+    }
+
+    function isRoomMember(code) {
+      return signedIn() && exists(memberPath(code));
+    }
+
+    function memberData(code) {
+      return get(memberPath(code)).data;
+    }
+
+    function isRoomAdmin(code) {
+      return isDeveloper() || (isRoomMember(code) && memberData(code).role == "admin");
+    }
+
+    function isRoomPlayer(code) {
+      return isRoomMember(code) && memberData(code).role == "player";
+    }
+
+    function currentPlayerId(code) {
+      return isRoomPlayer(code) ? memberData(code).playerId : "";
+    }
+
+    match /matches/{code} {
+      allow get: if signedIn();
+      allow list: if isDeveloper();
+      allow create: if false;
+      allow update: if isRoomAdmin(code);
+      allow delete: if isDeveloper();
+
+      match /members/{uid} {
+        allow get: if signedIn() && (uid == request.auth.uid || isRoomAdmin(code));
+        allow list: if isRoomAdmin(code);
+        allow create, update, delete: if false;
+      }
+
+      match /players/{playerId} {
+        allow get, list: if signedIn();
+        allow create: if isRoomAdmin(code);
+        allow update: if isRoomAdmin(code)
+          || (
+            isRoomPlayer(code)
+            && playerId == currentPlayerId(code)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "name",
+              "nameLower",
+              "baseNote",
+              "position",
+              "updatedAt",
+              "selfRatedRoundId",
+              "selfRatedAtMs",
+              "attendanceUpdatedAt",
+              "present",
+              "team",
+              "checkedInAtMs",
+              "presenceRoundId",
+              "lastLoginAt",
+              "lastLoginUid"
+            ])
+          );
+        allow delete: if isRoomAdmin(code);
+      }
+
+      match /ratings/{ratingId} {
+        allow get, list: if signedIn();
+        allow create, update: if isRoomAdmin(code)
+          || (
+            isRoomPlayer(code)
+            && request.resource.data.raterId == currentPlayerId(code)
+            && request.resource.data.targetId is string
+          );
+        allow delete: if isRoomAdmin(code)
+          || (isRoomPlayer(code) && resource.data.raterId == currentPlayerId(code));
+      }
+
+      match /snapshots/{snapshotId} {
+        allow get, list: if signedIn();
+        allow create, update, delete: if isRoomAdmin(code);
+      }
+
+      match /audit/{auditId} {
+        allow get, list: if isRoomAdmin(code);
+        allow create: if isRoomMember(code) || isDeveloper();
+        allow update, delete: if false;
+      }
+
+      match /rounds/{roundId} {
+        allow get, list: if signedIn();
+        allow create, update, delete: if isRoomAdmin(code);
+
+        match /attendance/{playerId} {
+          allow get, list: if signedIn();
+          allow create, update: if isRoomAdmin(code)
+            || (
+              isRoomPlayer(code)
+              && playerId == currentPlayerId(code)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                "present",
+                "team",
+                "checkedInAtMs",
+                "updatedAt"
+              ])
+            );
+          allow delete: if isRoomAdmin(code)
+            || (isRoomPlayer(code) && playerId == currentPlayerId(code));
+        }
+      }
+    }
+  }
+}
