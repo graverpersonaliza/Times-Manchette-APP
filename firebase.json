@@ -1,0 +1,31 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "functions": {
+    "source": "functions"
+  },
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "functions/**",
+      "*.zip",
+      "README.md",
+      "SECURITY.md",
+      "ARQUITETURA.md",
+      "CHANGELOG.md",
+      "DEPLOY-GITHUB-FIREBASE.md",
+      "MANUAL-ADMIN.md",
+      "MANUAL-DESENVOLVEDOR.md"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
