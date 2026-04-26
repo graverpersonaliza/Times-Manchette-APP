@@ -1,5 +1,9 @@
 /* PWA Service Worker */
+<<<<<<< HEAD
 const CACHE_NAME = "manchette-figurinha-whatsapp-v1";
+=======
+const CACHE_NAME = "manchette-v130-evaluation-nudge";
+>>>>>>> fab71ff0c8081b5aa2fa53e0b66bfe56bd243df7
 const ASSETS = [
   "./",
   "./index.html",

@@ -3934,6 +3934,7 @@ Continuar?`);
       return formatTeamsText(s);
     }
 
+<<<<<<< HEAD
     function miniListTeamLabel(team){
       if(team === 1) return String(state.team1Name || "Time 1").trim() || "Time 1";
       if(team === 2) return String(state.team2Name || "Time 2").trim() || "Time 2";
@@ -4099,6 +4100,8 @@ Continuar?`);
       }
     }
 
+=======
+>>>>>>> fab71ff0c8081b5aa2fa53e0b66bfe56bd243df7
     function buildExportElement(payload){
       const wrap = document.createElement("div");
       wrap.style.width = "1100px";
@@ -4783,13 +4786,20 @@ Continuar?`);
                       <button id="btnCopyTeams" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Copiar tabela</button>
                       <button id="btnWATeams" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>WhatsApp</button>
                       <button id="btnDownloadPng" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Baixar lista</button>
+<<<<<<< HEAD
                       <button id="btnDownloadMiniList" class="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold ${presentPlayers.length ? "" : "opacity-50 cursor-not-allowed"}" ${presentPlayers.length ? "" : "disabled"}>Baixar mini lista</button>
+=======
+>>>>>>> fab71ff0c8081b5aa2fa53e0b66bfe56bd243df7
                       <button id="btnSaveTeams" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${(team1.length+team2.length) ? "" : "opacity-50 cursor-not-allowed"}" ${(team1.length+team2.length) ? "" : "disabled"}>Salvar no histórico</button>
                       <button id="btnDownloadBackup" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Backup JSON</button>
                       <button id="btnImportBackup" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Restaurar backup</button>
                       <button id="btnDownloadAudit" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">Baixar log</button>
                     </div>
+<<<<<<< HEAD
                     <div class="mt-2 text-xs text-gray-500">Somente admin. A mini lista gera uma imagem compacta com número, nome e time ao longo das presenças. O log registra ações críticas.</div>
+=======
+                    <div class="mt-2 text-xs text-gray-500">Somente admin. Copie, exporte ou restaure a sala com backup JSON. O log registra ações críticas.</div>
+>>>>>>> fab71ff0c8081b5aa2fa53e0b66bfe56bd243df7
 
                     <div class="mt-4">
                       <div class="flex items-center justify-between">
@@ -5113,7 +5123,10 @@ Continuar?`);
         if($("btnCopyTeams")) $("btnCopyTeams").onclick = ()=> copyCurrentTeams();
         if($("btnWATeams")) $("btnWATeams").onclick = ()=> whatsCurrentTeams();
         if($("btnDownloadPng")) $("btnDownloadPng").onclick = ()=> downloadTeamsPng();
+<<<<<<< HEAD
         if($("btnDownloadMiniList")) $("btnDownloadMiniList").onclick = ()=> downloadMiniListPng();
+=======
+>>>>>>> fab71ff0c8081b5aa2fa53e0b66bfe56bd243df7
         if($("btnSaveTeams")) $("btnSaveTeams").onclick = ()=> saveTeamsSnapshot();
         if($("btnDownloadBackup")) $("btnDownloadBackup").onclick = ()=> downloadRoomBackup();
         if($("btnImportBackup")) $("btnImportBackup").onclick = ()=> importRoomBackup();
